@@ -269,8 +269,17 @@ def _profile_summary(profile: ProjectProfile) -> dict[str, Any]:
             "coverage_command": profile.build.coverage_command,
             "target_coverage_command": profile.build.target_coverage_command,
             "coverage_xml": profile.build.coverage_xml,
+            "build_timeout_seconds": profile.build.build_timeout_seconds,
+            "test_timeout_seconds": profile.build.test_timeout_seconds,
+            "coverage_timeout_seconds": profile.build.coverage_timeout_seconds,
         },
         "test_support": profile.test_support.model_dump(mode="json"),
+        "codrax_runtime": {
+            "idle_timeout_seconds": profile.evidence.codrax.idle_timeout_seconds,
+            "max_runtime_seconds": profile.evidence.codrax.max_runtime_seconds,
+            "live_log_max_bytes": profile.evidence.codrax.live_log_max_bytes,
+            "live_log_keep_tail_bytes": profile.evidence.codrax.live_log_keep_tail_bytes,
+        },
     }
 
 
@@ -425,6 +434,7 @@ def _collect_artifacts(root: Path, run_dir: Path) -> dict[str, str]:
         "coverage_goal.json",
         "profile_evidence.md",
         "codrax_evidence.md",
+        "codrax_live.log",
         "project_understanding.md",
         "decision_report.md",
         "test_obligations.md",

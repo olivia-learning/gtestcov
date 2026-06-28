@@ -53,6 +53,7 @@ def collect_project_understanding(
     target: str,
     profile: ProjectProfile,
     questions: tuple[CodebaseQuestion, ...] = DEFAULT_UNDERSTANDING_QUESTIONS,
+    run_dir: Path | None = None,
 ) -> ProjectUnderstanding:
     cfg = profile.evidence.codrax
     if not cfg.enabled:
@@ -64,7 +65,7 @@ def collect_project_understanding(
             notes=["CODRAX project understanding is disabled; project-specific assumptions are not available."],
         )
 
-    evidence = ask_codrax_for_code_fact(project_root, profile, build_understanding_request(target, questions))
+    evidence = ask_codrax_for_code_fact(project_root, profile, build_understanding_request(target, questions), run_dir=run_dir)
     understanding = parse_understanding(evidence, target, [question.question_id for question in questions])
     if evidence.status == "ok" and not understanding.findings:
         understanding.status = "insufficient"
@@ -72,9 +73,14 @@ def collect_project_understanding(
     return understanding
 
 
-def ask_codrax_for_code_fact(project_root: Path, profile: ProjectProfile, question: str) -> CodraxEvidence:
+def ask_codrax_for_code_fact(
+    project_root: Path,
+    profile: ProjectProfile,
+    question: str,
+    run_dir: Path | None = None,
+) -> CodraxEvidence:
     cfg = profile.evidence.codrax
-    return execute_codrax_request(project_root.resolve(), cfg, question, enabled=cfg.enabled)
+    return execute_codrax_request(project_root.resolve(), cfg, question, enabled=cfg.enabled, run_dir=run_dir)
 
 
 def generate_project_understanding(
@@ -85,7 +91,7 @@ def generate_project_understanding(
     root = project_root.resolve()
     profile = load_profile(root)
     run_id, run_dir = ensure_run_dir(root, run_id)
-    understanding = collect_project_understanding(root, target, profile)
+    understanding = collect_project_understanding(root, target, profile, run_dir=run_dir)
     path = write_project_understanding(run_dir, understanding)
     if understanding.codrax_evidence.enabled:
         write_codrax_evidence(run_dir, understanding.codrax_evidence)

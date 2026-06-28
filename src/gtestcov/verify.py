@@ -24,6 +24,9 @@ def verify_iteration(
     line_coverage: float | None = None,
     max_stagnant_rounds: int | None = None,
     min_improvement: float | None = None,
+    build_timeout: int | None = None,
+    test_timeout: int | None = None,
+    coverage_timeout: int | None = None,
 ) -> dict[str, Any]:
     root = project_root.resolve()
     profile = load_profile(root)
@@ -44,7 +47,7 @@ def verify_iteration(
         results["blocked_by_preflight"] = True
         results["commands"] = {
             label: _skipped_command(command, "blocked_by_preflight")
-            for label, command in _command_plan(profile)
+            for label, command, _timeout in _command_plan(profile, build_timeout, test_timeout, coverage_timeout)
         }
         results["coverage"] = {
             "found": False,
@@ -60,8 +63,8 @@ def verify_iteration(
         refresh_memory(root, run_id)
         return results
 
-    for label, command in _command_plan(profile):
-        results["commands"][label] = _run_command(command, root, label)
+    for label, command, timeout_seconds in _command_plan(profile, build_timeout, test_timeout, coverage_timeout):
+        results["commands"][label] = _run_command(command, root, label, timeout_seconds)
 
     coverage_path = _find_coverage_report(root, run_dir, profile.build.coverage_xml)
     if coverage_path:
@@ -98,26 +101,63 @@ def verify_iteration(
     return results
 
 
-def _command_plan(profile) -> list[tuple[str, str]]:
+def _command_plan(
+    profile,
+    build_timeout: int | None = None,
+    test_timeout: int | None = None,
+    coverage_timeout: int | None = None,
+) -> list[tuple[str, str, int]]:
     return [
-        ("build", profile.build.incremental_build_command or profile.build.build_command),
-        ("test", profile.build.filtered_test_command or profile.build.test_command),
-        ("coverage", profile.build.target_coverage_command or profile.build.coverage_command),
+        (
+            "build",
+            profile.build.incremental_build_command or profile.build.build_command,
+            profile.build.build_timeout_seconds if build_timeout is None else build_timeout,
+        ),
+        (
+            "test",
+            profile.build.filtered_test_command or profile.build.test_command,
+            profile.build.test_timeout_seconds if test_timeout is None else test_timeout,
+        ),
+        (
+            "coverage",
+            profile.build.target_coverage_command or profile.build.coverage_command,
+            profile.build.coverage_timeout_seconds if coverage_timeout is None else coverage_timeout,
+        ),
     ]
 
 
-def _run_command(command: str, cwd: Path, label: str = "") -> dict[str, Any]:
+def _run_command(command: str, cwd: Path, label: str = "", timeout_seconds: int = 600) -> dict[str, Any]:
     if not command:
-        return {"configured": False, "returncode": None, "stdout": "", "stderr": "", "diagnostics": []}
-    completed = subprocess.run(
-        command,
-        cwd=str(cwd),
-        shell=True,
-        text=True,
-        capture_output=True,
-        timeout=600,
-    )
+        return {
+            "configured": False,
+            "returncode": None,
+            "stdout": "",
+            "stderr": "",
+            "diagnostics": [],
+            "timeout": False,
+            "timeout_seconds": timeout_seconds,
+        }
     diagnostics: list[str] = []
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=str(cwd),
+            shell=True,
+            text=True,
+            capture_output=True,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        diagnostics.append(f"{label or 'command'} command timed out after {timeout_seconds} seconds")
+        return {
+            "configured": True,
+            "returncode": 124,
+            "stdout": _tail_text(exc.stdout),
+            "stderr": _tail_text(exc.stderr),
+            "diagnostics": diagnostics,
+            "timeout": True,
+            "timeout_seconds": timeout_seconds,
+        }
     returncode = completed.returncode
     combined = f"{completed.stdout}\n{completed.stderr}"
     if label == "test" and re.search(r"No tests were found|No tests were run|Total Tests:\s*0", combined, re.I):
@@ -127,9 +167,11 @@ def _run_command(command: str, cwd: Path, label: str = "") -> dict[str, Any]:
     return {
         "configured": True,
         "returncode": returncode,
-        "stdout": completed.stdout[-8000:],
-        "stderr": completed.stderr[-8000:],
+        "stdout": _tail_text(completed.stdout),
+        "stderr": _tail_text(completed.stderr),
         "diagnostics": diagnostics,
+        "timeout": False,
+        "timeout_seconds": timeout_seconds,
     }
 
 
@@ -141,7 +183,16 @@ def _skipped_command(command: str, reason: str) -> dict[str, Any]:
         "stderr": "",
         "diagnostics": [reason],
         "skipped": True,
+        "timeout": False,
     }
+
+
+def _tail_text(value: str | bytes | None, limit: int = 8000) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="replace")
+    return value[-limit:]
 
 
 def _commands_ok(results: dict[str, Any]) -> bool:

@@ -18,7 +18,16 @@ from .profile_sync import profile_sync
 from .profile import write_default_profile
 from .task import build_task
 from .understanding import generate_project_understanding
+from .upgrade import (
+    install_doctor,
+    rollback_apply,
+    rollback_list,
+    upgrade_apply,
+    upgrade_inspect,
+    restore_custom,
+)
 from .verify import verify_iteration
+from .version import get_version_info, package_root
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -77,6 +86,9 @@ def main(argv: list[str] | None = None) -> None:
     verify.add_argument("--line-coverage", type=float, default=None)
     verify.add_argument("--max-stagnant-rounds", type=int, default=None)
     verify.add_argument("--min-improvement", type=float, default=None)
+    verify.add_argument("--build-timeout", type=int, default=None)
+    verify.add_argument("--test-timeout", type=int, default=None)
+    verify.add_argument("--coverage-timeout", type=int, default=None)
 
     check = sub.add_parser("check", help="Run preflight checks before build/test/coverage.")
     check.add_argument("--project-root", default=".")
@@ -102,6 +114,56 @@ def main(argv: list[str] | None = None) -> None:
     memory_show.add_argument("--project-root", default=".")
     memory_show.add_argument("--run-id", default="latest")
     memory_show.add_argument("--format", choices=["md", "json"], default="md")
+
+    version = sub.add_parser("version", help="Show gtestcov version and installation details.")
+    version.add_argument("--tool-root", default="")
+    version.add_argument("--install-mode", choices=["auto", "zip", "git", "unknown"], default="auto")
+
+    install = sub.add_parser("install", help="Install and environment checks.")
+    install_sub = install.add_subparsers(dest="install_command", required=True)
+    install_doctor_cmd = install_sub.add_parser("doctor", help="Check the active gtestcov installation.")
+    install_doctor_cmd.add_argument("--project-root", default="")
+    install_doctor_cmd.add_argument("--tool-root", default="")
+    install_doctor_cmd.add_argument("--tool-home", default="")
+
+    upgrade = sub.add_parser("upgrade", help="Inspect, apply, or restore a controlled gtestcov upgrade.")
+    upgrade_sub = upgrade.add_subparsers(dest="upgrade_command", required=True)
+    upgrade_inspect_cmd = upgrade_sub.add_parser("inspect", help="Generate the old-version detection report.")
+    upgrade_inspect_cmd.add_argument("--tool-root", default="")
+    upgrade_inspect_cmd.add_argument("--project-root", default=".")
+    upgrade_inspect_cmd.add_argument("--target-ref", default="main")
+    upgrade_inspect_cmd.add_argument("--install-mode", choices=["auto", "zip", "git"], default="auto")
+    upgrade_inspect_cmd.add_argument("--upgrade-id", default="")
+    upgrade_inspect_cmd.add_argument("--tool-home", default="")
+
+    upgrade_apply_cmd = upgrade_sub.add_parser("apply", help="Apply an inspected upgrade after explicit approval.")
+    upgrade_apply_cmd.add_argument("--upgrade-id", required=True)
+    upgrade_apply_cmd.add_argument("--approve-overwrite-tool-modifications", action="store_true")
+    upgrade_apply_cmd.add_argument("--project-root", default=".")
+    upgrade_apply_cmd.add_argument("--tool-root", default="")
+    upgrade_apply_cmd.add_argument("--tool-home", default="")
+    upgrade_apply_cmd.add_argument("--source-tool-root", default="")
+    upgrade_apply_cmd.add_argument("--source-zip", default="")
+    upgrade_apply_cmd.add_argument("--install-mode", choices=["auto", "zip", "git"], default="auto")
+    upgrade_apply_cmd.add_argument("--venv", default="", help="Existing reusable virtual environment to refresh after slot switch.")
+    upgrade_apply_cmd.add_argument("--skip-venv-refresh", action="store_true", help="Do not refresh the active venv entry point.")
+
+    restore_custom_cmd = upgrade_sub.add_parser("restore-custom", help="Restore reviewed custom tool changes after upgrade.")
+    restore_custom_cmd.add_argument("--upgrade-id", required=True)
+    restore_custom_cmd.add_argument("--tool-home", default="")
+
+    rollback = sub.add_parser("rollback", help="List or apply gtestcov upgrade rollback points.")
+    rollback_sub = rollback.add_subparsers(dest="rollback_command", required=True)
+    rollback_list_cmd = rollback_sub.add_parser("list", help="List project rollback points.")
+    rollback_list_cmd.add_argument("--project-root", default=".")
+    rollback_list_cmd.add_argument("--tool-home", default="")
+    rollback_apply_cmd = rollback_sub.add_parser("apply", help="Restore old tool slot and old project .gtestcov state.")
+    rollback_apply_cmd.add_argument("--upgrade-id", required=True)
+    rollback_apply_cmd.add_argument("--project-root", default=".")
+    rollback_apply_cmd.add_argument("--tool-home", default="")
+    rollback_apply_cmd.add_argument("--approve", action="store_true")
+    rollback_apply_cmd.add_argument("--venv", default="", help="Existing reusable virtual environment to refresh after rollback.")
+    rollback_apply_cmd.add_argument("--skip-venv-refresh", action="store_true", help="Do not refresh the active venv entry point.")
 
     sub.add_parser("mcp", help="Start the stdio MCP server.")
 
@@ -165,6 +227,9 @@ def main(argv: list[str] | None = None) -> None:
                     args.line_coverage,
                     args.max_stagnant_rounds,
                     args.min_improvement,
+                    args.build_timeout,
+                    args.test_timeout,
+                    args.coverage_timeout,
                 ),
                 indent=2,
             )
@@ -193,6 +258,72 @@ def main(argv: list[str] | None = None) -> None:
             print(json.dumps(result["content"], indent=2))
         else:
             print(result["content"])
+    elif args.command == "version":
+        tool_root = Path(args.tool_root).resolve() if args.tool_root else package_root()
+        print(json.dumps(get_version_info(tool_root, args.install_mode).as_dict(), indent=2))
+    elif args.command == "install":
+        project_root = Path(args.project_root).resolve() if args.project_root else None
+        tool_root = Path(args.tool_root).resolve() if args.tool_root else None
+        tool_home = Path(args.tool_home).expanduser() if args.tool_home else None
+        print(json.dumps(install_doctor(project_root, tool_root, tool_home), indent=2))
+    elif args.command == "upgrade":
+        tool_home = Path(args.tool_home).expanduser() if getattr(args, "tool_home", "") else None
+        if args.upgrade_command == "inspect":
+            tool_root = Path(args.tool_root).resolve() if args.tool_root else package_root()
+            print(
+                json.dumps(
+                    upgrade_inspect(
+                        tool_root=tool_root,
+                        project_root=Path(args.project_root),
+                        target_ref=args.target_ref,
+                        install_mode=args.install_mode,
+                        upgrade_id=args.upgrade_id or None,
+                        tool_home=tool_home,
+                    ),
+                    indent=2,
+                )
+            )
+        elif args.upgrade_command == "apply":
+            tool_root = Path(args.tool_root).resolve() if args.tool_root else package_root()
+            source_tool_root = Path(args.source_tool_root).resolve() if args.source_tool_root else None
+            source_zip = Path(args.source_zip).resolve() if args.source_zip else None
+            print(
+                json.dumps(
+                    upgrade_apply(
+                        upgrade_id=args.upgrade_id,
+                        approve_overwrite_tool_modifications=args.approve_overwrite_tool_modifications,
+                        tool_home=tool_home,
+                        project_root=Path(args.project_root),
+                        tool_root=tool_root,
+                        source_tool_root=source_tool_root,
+                        source_zip=source_zip,
+                        install_mode=None if args.install_mode == "auto" else args.install_mode,
+                        venv_path=Path(args.venv).expanduser() if args.venv else None,
+                        skip_venv_refresh=args.skip_venv_refresh,
+                    ),
+                    indent=2,
+                )
+            )
+        elif args.upgrade_command == "restore-custom":
+            print(json.dumps(restore_custom(args.upgrade_id, tool_home), indent=2))
+    elif args.command == "rollback":
+        tool_home = Path(args.tool_home).expanduser() if args.tool_home else None
+        if args.rollback_command == "list":
+            print(json.dumps(rollback_list(Path(args.project_root), tool_home), indent=2))
+        elif args.rollback_command == "apply":
+            print(
+                json.dumps(
+                    rollback_apply(
+                        args.upgrade_id,
+                        Path(args.project_root),
+                        args.approve,
+                        tool_home,
+                        Path(args.venv).expanduser() if args.venv else None,
+                        args.skip_venv_refresh,
+                    ),
+                    indent=2,
+                )
+            )
     elif args.command == "mcp":
         run_mcp_server()
 

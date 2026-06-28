@@ -13,6 +13,13 @@ The tool follows `codex_embedded_cpp_gtest_final_guide.md`:
 5. preflight-check generated edits before compiling,
 6. verify focused build, filtered test, target coverage, and coverage-loop progress.
 
+## Which Document Should I Read?
+
+- Install, upgrade, rollback, or let an AI install the tool: `docs/install.md`
+- Repository and generated project directory structure: `docs/project_structure.md`
+- Plain-language workflow diagram: `docs/gtestcov_workflow.md`
+- Editable diagrams.net / draw.io workflow: `docs/gtestcov_workflow.drawio`
+
 ## Quick Start
 
 ```bash
@@ -24,6 +31,52 @@ gtestcov verify --project-root /path/to/cpp/project --run-id latest
 gtestcov next-round --project-root /path/to/cpp/project --run-id latest
 gtestcov memory-show --project-root /path/to/cpp/project --run-id latest
 ```
+
+## Version, Install, Upgrade, And Rollback
+
+Use `docs/install.md` as the single source of truth for installation,
+AI-assisted installation, upgrade, restore-custom, and rollback.
+
+### Versioning Policy
+
+`gtestcov` uses SemVer-style tool versions: `MAJOR.MINOR.PATCH`.
+
+- `PATCH` is for compatible bug fixes.
+- `MINOR` is for compatible feature additions.
+- `MAJOR` is for breaking CLI, profile, memory, task, or upgrade behavior.
+
+While the tool is still in the `0.x` stage, minor releases may move quickly, so
+every upgrade must still start with `gtestcov upgrade inspect`. Git tags use
+`vX.Y.Z`; release zip files use `gtestcov-vX.Y.Z.zip`.
+
+The tool version and generated-state schema versions are separate. For example,
+`gtestcov version` reports both `version` and `memory_schema_version`. The
+memory schema changes only when old `.gtestcov` state requires migration; adding
+compatible fields does not require a schema bump.
+
+`pyproject.toml` is the main tool-version source. `version.py` keeps a matching
+fallback only for damaged or unusual runtime environments.
+
+Core commands:
+
+```bash
+gtestcov version
+gtestcov install doctor --project-root /path/to/cpp/project
+gtestcov upgrade inspect --tool-root /path/to/gtestcov --project-root /path/to/cpp/project --target-ref <tag-or-branch> --install-mode zip|git
+gtestcov upgrade apply --upgrade-id <id> --project-root /path/to/cpp/project --approve-overwrite-tool-modifications
+gtestcov rollback list --project-root /path/to/cpp/project
+gtestcov rollback apply --upgrade-id <id> --project-root /path/to/cpp/project --approve
+```
+
+Upgrades must start with `upgrade inspect`, which writes an old-version
+detection report for user review. `upgrade apply` refuses to run without the
+explicit approval flag. The tool uses A/B slots for old and new tool copies and
+keeps project `.gtestcov` snapshots so rollback is possible. The Python virtual
+environment should be reused across installs and upgrades; do not recreate it
+unless the user approves a repair. After an A/B slot switch, `upgrade apply`
+and `rollback apply` automatically attempt to refresh the reused venv entry
+point with `--no-deps`; if the tool cannot detect the venv, the AI installer
+should pass `--venv` and continue without asking the user to run pip manually.
 
 ## Workflow Diagram
 
@@ -74,6 +127,10 @@ evidence:
     model_policy: self_hosted_ok
     max_context: targeted
     require_file_line: true
+    idle_timeout_seconds: 300
+    max_runtime_seconds: 7200
+    live_log_max_bytes: 10485760
+    live_log_keep_tail_bytes: 1048576
 ```
 
 Then check the integration and collect evidence without generating tests:
@@ -93,6 +150,14 @@ It records the CODRAX status, keeps generic C++/GTest static signals only as
 diagnostics, and writes manual review material instead of asking the weak AI to
 guess project details. Project-specific adapters do not activate without
 CODRAX-cited evidence.
+
+CODRAX execution is streamed into `.gtestcov/runs/<run_id>/codrax_live.log`.
+The idle timeout stops only when CODRAX produces no output for the configured
+activity window, while the max runtime is a hard ceiling for a long analysis.
+The live log is bounded: after it reaches `live_log_max_bytes`, `gtestcov` keeps
+the newest `live_log_keep_tail_bytes` and records that older output was dropped.
+Curated CODRAX evidence remains the source of project facts; the live log is
+diagnostic material.
 
 `profile-sync` uses the CODRAX evidence backend to find project-specific build,
 test, coverage, and test-support paths. It
@@ -259,10 +324,16 @@ coverage:
   branch_expansion_threshold: 70.0
 ```
 
-When running under WSL, keep the tool checkout and target C++ project on the
-Linux filesystem when possible, for example under `~/work`. Building or doing
-editable Python installs directly under `/mnt/c` can hit Windows filesystem
-permission semantics that CMake and setuptools do not handle well.
+## Linux And WSL Support
+
+`gtestcov` is a Python CLI/MCP tool and is designed to run naturally on Linux.
+Native Linux is the preferred environment for large C++ builds when available.
+
+WSL is also supported. When running under WSL, keep the tool checkout and target
+C++ project on the Linux filesystem when possible, for example under `~/work`.
+Building or doing editable Python installs directly under `/mnt/c` can hit
+Windows filesystem permission semantics that CMake and setuptools do not handle
+well.
 
 OpenCode can load the MCP server with this config:
 

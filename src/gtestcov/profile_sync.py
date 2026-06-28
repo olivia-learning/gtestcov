@@ -65,7 +65,7 @@ def profile_sync(
     run_id, run_dir = ensure_run_dir(root, run_id)
     profile = load_profile(root)
     cfg = profile.evidence.codrax
-    evidence = execute_codrax_request(root, cfg, build_profile_sync_request(target, build_file), enabled=cfg.enabled)
+    evidence = execute_codrax_request(root, cfg, build_profile_sync_request(target, build_file), enabled=cfg.enabled, run_dir=run_dir)
 
     if evidence.status != "ok":
         write_codrax_evidence(run_dir, evidence)

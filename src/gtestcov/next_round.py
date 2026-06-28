@@ -385,7 +385,7 @@ def _collect_next_round_evidence(
 ) -> CodraxEvidence:
     profile = load_profile(project_root)
     request = build_next_round_request(run_id, target, verify, history)
-    evidence = execute_codrax_request(project_root, profile.evidence.codrax, request, enabled=profile.evidence.codrax.enabled)
+    evidence = execute_codrax_request(project_root, profile.evidence.codrax, request, enabled=profile.evidence.codrax.enabled, run_dir=run_dir)
     write_codrax_evidence(run_dir, evidence)
     return evidence
 

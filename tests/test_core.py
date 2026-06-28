@@ -6,11 +6,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+import gtestcov.version as version_module
 from gtestcov.cover import cover_target
 from gtestcov.coverage_goal import write_coverage_goal
 from gtestcov.diagnose import diagnose_failure
 from gtestcov.analyzer import analyze_target
-from gtestcov.codrax import codrax_check
+from gtestcov.codrax import codrax_check, generate_codrax_evidence
 from gtestcov.dependency import classify_symbol, parse_dependency_xml
 from gtestcov.discovery import discover_project
 from gtestcov.memory import refresh_memory, show_memory
@@ -18,6 +19,17 @@ from gtestcov.preflight import preflight_check
 from gtestcov.profile_sync import profile_sync
 from gtestcov.profile import load_profile, profile_to_yaml
 from gtestcov.task import build_task
+from gtestcov.upgrade import (
+    build_install_manifest,
+    install_doctor,
+    rollback_apply,
+    rollback_list,
+    restore_custom,
+    upgrade_apply,
+    upgrade_inspect,
+    write_install_manifest,
+)
+from gtestcov.version import get_version_info
 from gtestcov.verify import audit_generated_tests, parse_gcovr_summary, parse_gcovr_xml, verify_iteration
 
 
@@ -41,6 +53,28 @@ def write_fake_codrax(tmp_path: Path, output: str, returncode: int = 0) -> str:
         "parser.add_argument('--request')\n"
         "parser.parse_args()\n"
         f"sys.stdout.write({output!r})\n"
+        f"sys.exit({returncode})\n",
+        encoding="utf-8",
+    )
+    return f'"{sys.executable}" "{script}"'
+
+
+def write_fake_streaming_codrax(tmp_path: Path, events: list[tuple[str, str, float]], returncode: int = 0) -> str:
+    script = tmp_path / "fake_codrax_streaming.py"
+    script.write_text(
+        "import argparse\n"
+        "import sys\n"
+        "import time\n"
+        "parser = argparse.ArgumentParser()\n"
+        "parser.add_argument('--repo')\n"
+        "parser.add_argument('--request')\n"
+        "parser.parse_args()\n"
+        f"events = {events!r}\n"
+        "for stream, text, delay in events:\n"
+        "    target = sys.stderr if stream == 'stderr' else sys.stdout\n"
+        "    print(text, file=target, flush=True)\n"
+        "    if delay:\n"
+        "        time.sleep(delay)\n"
         f"sys.exit({returncode})\n",
         encoding="utf-8",
     )
@@ -268,7 +302,9 @@ def test_generic_layers_do_not_embed_project_specific_terms() -> None:
         REPO_ROOT / "src" / "gtestcov" / "preflight.py",
         REPO_ROOT / "src" / "gtestcov" / "task.py",
         REPO_ROOT / "src" / "gtestcov" / "understanding.py",
+        REPO_ROOT / "src" / "gtestcov" / "upgrade.py",
         REPO_ROOT / "src" / "gtestcov" / "verify.py",
+        REPO_ROOT / "src" / "gtestcov" / "version.py",
     ]
     forbidden = [
         "F Prime",
@@ -484,6 +520,109 @@ def test_codrax_args_template_handles_unrecognized_cli_protocol(tmp_path: Path) 
     assert analysis.codrax_evidence.invocation == "args_template"
     assert "src/energy_service.cpp:12" in analysis.codrax_evidence.file_line_refs
     assert check["discovery"]["selected_invocation"] == "args_template"
+
+
+def test_codrax_streams_live_log_for_run_artifacts(tmp_path: Path) -> None:
+    root = copy_mini_repo(tmp_path)
+    command = write_fake_streaming_codrax(
+        tmp_path,
+        [
+            ("stdout", "- target: src/energy_service.cpp:12 handles Init.", 0.1),
+            ("stderr", "progress: indexing tests/energy_service_component_test.cpp:20", 0.1),
+            ("stdout", "- harness: tests/support/harness/energy_service_harness.hpp:1 can be reused.", 0),
+        ],
+    )
+    profile = load_profile(root)
+    profile.evidence.codrax.enabled = True
+    profile.evidence.codrax.command = command
+    profile.evidence.codrax.idle_timeout_seconds = 2
+    profile.evidence.codrax.max_runtime_seconds = 10
+    (root / "project_profile.yaml").write_text(profile_to_yaml(profile), encoding="utf-8")
+
+    evidence, _ = generate_codrax_evidence(root, "src/energy_service.cpp", run_id="codrax-live")
+
+    live_log = Path(evidence.live_log_path)
+    log_text = live_log.read_text(encoding="utf-8")
+    assert evidence.status == "ok"
+    assert evidence.timeout_kind == ""
+    assert "src/energy_service.cpp:12" in evidence.file_line_refs
+    assert live_log.exists()
+    assert "CODRAX live output captured by gtestcov" in log_text
+    assert "progress: indexing" in log_text
+    assert evidence.live_log_truncated is False
+    assert evidence.live_log_size_bytes == live_log.stat().st_size
+
+
+def test_codrax_idle_timeout_uses_activity_not_fixed_request_timeout(tmp_path: Path) -> None:
+    root = copy_mini_repo(tmp_path)
+    command = write_fake_streaming_codrax(
+        tmp_path,
+        [("stdout", "- target: src/energy_service.cpp:12 starts analysis.", 2.0)],
+    )
+    profile = load_profile(root)
+    profile.evidence.codrax.enabled = True
+    profile.evidence.codrax.command = command
+    profile.evidence.codrax.idle_timeout_seconds = 1
+    profile.evidence.codrax.max_runtime_seconds = 10
+    (root / "project_profile.yaml").write_text(profile_to_yaml(profile), encoding="utf-8")
+
+    evidence, _ = generate_codrax_evidence(root, "src/energy_service.cpp", run_id="codrax-idle")
+
+    assert evidence.status == "timeout"
+    assert evidence.timeout_kind == "idle"
+    assert "no output for 1 seconds" in " ".join(evidence.notes)
+    assert Path(evidence.live_log_path).exists()
+
+
+def test_codrax_max_runtime_timeout_stops_chatty_process(tmp_path: Path) -> None:
+    root = copy_mini_repo(tmp_path)
+    events = [
+        ("stdout", f"- progress {index}: src/energy_service.cpp:12 still running.", 0.2)
+        for index in range(30)
+    ]
+    command = write_fake_streaming_codrax(tmp_path, events)
+    profile = load_profile(root)
+    profile.evidence.codrax.enabled = True
+    profile.evidence.codrax.command = command
+    profile.evidence.codrax.idle_timeout_seconds = 5
+    profile.evidence.codrax.max_runtime_seconds = 1
+    (root / "project_profile.yaml").write_text(profile_to_yaml(profile), encoding="utf-8")
+
+    evidence, _ = generate_codrax_evidence(root, "src/energy_service.cpp", run_id="codrax-max")
+
+    assert evidence.status == "timeout"
+    assert evidence.timeout_kind == "max_runtime"
+    assert "max runtime of 1 seconds" in " ".join(evidence.notes)
+    assert Path(evidence.live_log_path).exists()
+
+
+def test_codrax_live_log_is_bounded_and_keeps_tail(tmp_path: Path) -> None:
+    root = copy_mini_repo(tmp_path)
+    events = [("stdout", "- early build anchor: CMakeLists.txt:1 dependency evidence", 0)] + [
+        ("stdout", f"- trace {index}: src/energy_service.cpp:{12 + index % 3} dependency detail " + ("x" * 40), 0)
+        for index in range(80)
+    ]
+    command = write_fake_streaming_codrax(tmp_path, events)
+    profile = load_profile(root)
+    profile.evidence.codrax.enabled = True
+    profile.evidence.codrax.command = command
+    profile.evidence.codrax.live_log_max_bytes = 700
+    profile.evidence.codrax.live_log_keep_tail_bytes = 180
+    profile.evidence.codrax.max_output_chars = 4000
+    (root / "project_profile.yaml").write_text(profile_to_yaml(profile), encoding="utf-8")
+
+    evidence, _ = generate_codrax_evidence(root, "src/energy_service.cpp", run_id="codrax-trim")
+
+    live_log = Path(evidence.live_log_path)
+    log_text = live_log.read_text(encoding="utf-8", errors="replace")
+    assert evidence.status == "ok"
+    assert evidence.live_log_truncated is True
+    assert evidence.dropped_log_bytes > 0
+    assert evidence.live_log_size_bytes <= profile.evidence.codrax.live_log_max_bytes
+    assert "CMakeLists.txt:1" in evidence.file_line_refs
+    assert "[gtestcov] live log truncated" in log_text
+    assert "trace 79" in log_text
+    assert "trace 0" not in log_text
 
 
 def test_profile_sync_updates_profile_with_codrax_evidence(tmp_path: Path) -> None:
@@ -720,6 +859,44 @@ targets:
     assert verify["coverage"]["line_rate_percent"] == 85.0
     assert verify["coverage"]["meets_threshold"] is True
     assert verify["passed"] is True
+
+
+def test_verify_command_timeout_is_reported_and_cli_override_works(tmp_path: Path) -> None:
+    root = tmp_path / "timeout_project"
+    root.mkdir()
+    profile = load_profile(root)
+    profile.build.build_command = f'"{sys.executable}" -c "import time; print(\'build started\', flush=True); time.sleep(2)"'
+    profile.build.build_timeout_seconds = 30
+    (root / "project_profile.yaml").write_text(profile_to_yaml(profile), encoding="utf-8")
+
+    cli = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "gtestcov.cli",
+            "verify",
+            "--project-root",
+            str(root),
+            "--run-id",
+            "cli-timeout",
+            "--build-timeout",
+            "1",
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    verify = json.loads(cli.stdout)
+    verify_json = json.loads((root / ".gtestcov" / "runs" / "cli-timeout" / "verify.json").read_text(encoding="utf-8"))
+    assert cli.returncode == 0
+    assert verify["commands"]["build"]["timeout"] is True
+    assert verify["commands"]["build"]["returncode"] == 124
+    assert verify["commands"]["build"]["timeout_seconds"] == 1
+    assert "timed out after 1 seconds" in verify["commands"]["build"]["diagnostics"][0]
+    assert "build started" in verify["commands"]["build"]["stdout"]
+    assert verify_json["commands"]["build"]["timeout"] is True
+    assert verify["passed"] is False
 
 
 def write_target_coverage(root: Path, target: str, rate: float) -> None:
@@ -1322,3 +1499,297 @@ coverage:
     assert verify["commands"]["test"]["returncode"] == 1
     assert verify["commands"]["test"]["diagnostics"] == ["test command completed without discovering tests"]
     assert verify["passed"] is False
+
+
+def make_fake_tool_root(tmp_path: Path, name: str, marker: str) -> Path:
+    tool = tmp_path / name
+    package = tool / "src" / "gtestcov"
+    package.mkdir(parents=True)
+    (tool / "pyproject.toml").write_text(
+        """
+[project]
+name = "gtestcov"
+version = "9.9.9"
+""",
+        encoding="utf-8",
+    )
+    (package / "__init__.py").write_text("__version__ = '9.9.9'\n", encoding="utf-8")
+    (package / "cli.py").write_text(f"MARKER = {marker!r}\n", encoding="utf-8")
+    return tool
+
+
+def test_version_and_install_doctor_report_environment(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "project_profile.yaml").write_text("project_name: version_project\n", encoding="utf-8")
+
+    info = get_version_info(REPO_ROOT)
+    doctor = install_doctor(project_root=project, tool_root=REPO_ROOT, tool_home=tmp_path / "tool_home")
+
+    assert info.version == "0.2.0"
+    assert info.version_source == "pyproject.toml"
+    assert info.memory_schema_version >= 1
+    assert isinstance(info.git_dirty, bool)
+    assert isinstance(info.git_modified_count, int)
+    assert doctor["status"] == "ok"
+    assert doctor["version"]["install_path"] == str(REPO_ROOT)
+    assert doctor["version"]["version_source"] == "pyproject.toml"
+    assert "git_dirty" in doctor["version"]
+    assert doctor["project_root"] == str(project)
+
+
+def test_version_info_reports_git_dirty_state(monkeypatch, tmp_path: Path) -> None:
+    tool = tmp_path / "tool"
+    tool.mkdir()
+    (tool / ".git").mkdir()
+    (tool / "pyproject.toml").write_text(
+        """
+[project]
+name = "gtestcov"
+version = "1.2.3"
+""",
+        encoding="utf-8",
+    )
+
+    def fake_git_status(_tool_root: Path, include_diff: bool = True) -> dict[str, object]:
+        return {
+            "available": True,
+            "branch": "feature/version",
+            "commit": "abc123",
+            "modified_files": ["src/gtestcov/version.py"],
+            "untracked_files": ["LOCAL.md"],
+            "raw_status": [" M src/gtestcov/version.py", "?? LOCAL.md"],
+            "diff": "" if not include_diff else "diff --git",
+        }
+
+    monkeypatch.setattr(version_module, "git_status", fake_git_status)
+    monkeypatch.setattr(version_module, "git_identity", lambda _tool_root: {"available": True, "remote": "origin-url"})
+
+    info = version_module.get_version_info(tool)
+    data = info.as_dict()
+
+    assert data["version"] == "1.2.3"
+    assert data["version_source"] == "pyproject.toml"
+    assert data["git_commit"] == "abc123"
+    assert data["git_branch"] == "feature/version"
+    assert data["git_remote"] == "origin-url"
+    assert data["git_dirty"] is True
+    assert data["git_modified_count"] == 2
+
+
+def test_install_doctor_warns_on_zip_manifest_version_mismatch(tmp_path: Path) -> None:
+    tool = make_fake_tool_root(tmp_path, "zip_tool", "zip")
+    (tool / "gtestcov_install_manifest.json").write_text(
+        json.dumps({"install_mode": "zip", "version": "0.1.0", "source": "gtestcov-v0.1.0.zip", "files": []}),
+        encoding="utf-8",
+    )
+
+    doctor = install_doctor(tool_root=tool, tool_home=tmp_path / "tool_home")
+
+    assert doctor["status"] == "warning"
+    assert doctor["version"]["version"] == "9.9.9"
+    assert doctor["version"]["zip_manifest_version"] == "0.1.0"
+    assert any("does not match runtime tool version" in warning for warning in doctor["doctor_warnings"])
+
+
+def test_zip_upgrade_inspect_apply_restore_and_rollback(tmp_path: Path) -> None:
+    old_tool = make_fake_tool_root(tmp_path, "old_tool", "old")
+    manifest = build_install_manifest(old_tool, source="gtestcov-v9.9.9.zip")
+    write_install_manifest(old_tool, manifest)
+    (old_tool / "src" / "gtestcov" / "cli.py").write_text("MARKER = 'user-custom'\n", encoding="utf-8")
+    (old_tool / "LOCAL_NOTES.md").write_text("local note\n", encoding="utf-8")
+
+    new_tool = make_fake_tool_root(tmp_path, "new_tool", "new")
+    project = tmp_path / "cpp_project"
+    run_dir = project / ".gtestcov" / "runs" / "old-run"
+    run_dir.mkdir(parents=True)
+    (project / "project_profile.yaml").write_text("project_name: upgrade_project\n", encoding="utf-8")
+    (run_dir / "keep.txt").write_text("old run evidence\n", encoding="utf-8")
+
+    tool_home = tmp_path / "tool_home"
+    inspected = upgrade_inspect(
+        tool_root=old_tool,
+        project_root=project,
+        target_ref="v0.2.0",
+        install_mode="zip",
+        upgrade_id="up-test",
+        tool_home=tool_home,
+    )
+    report = Path(inspected["report_md"]).read_text(encoding="utf-8")
+    refused = upgrade_apply(
+        upgrade_id="up-test",
+        approve_overwrite_tool_modifications=False,
+        tool_home=tool_home,
+        project_root=project,
+    )
+
+    assert inspected["status"] == "inspected"
+    assert "Local dirty state: `true`" in report
+    assert "src/gtestcov/cli.py" in report
+    assert "LOCAL_NOTES.md" in report
+    assert refused["status"] == "refused"
+    assert (project / ".gtestcov" / "upgrade_slots" / "up-test" / "old" / ".gtestcov" / "runs" / "old-run" / "keep.txt").exists()
+
+    applied = upgrade_apply(
+        upgrade_id="up-test",
+        approve_overwrite_tool_modifications=True,
+        tool_home=tool_home,
+        project_root=project,
+        source_tool_root=new_tool,
+        install_mode="zip",
+        skip_venv_refresh=True,
+    )
+    assert applied["status"] == "applied"
+    assert (tool_home / "current_slot").read_text(encoding="utf-8").strip() == applied["active_tool_slot"]
+    assert (Path(applied["active_tool_path"]) / "src" / "gtestcov" / "cli.py").read_text(encoding="utf-8") == "MARKER = 'new'\n"
+    assert applied["venv_refresh"]["status"] == "skipped"
+
+    restored = restore_custom("up-test", tool_home=tool_home)
+    listed = rollback_list(project, tool_home=tool_home)
+    rolled_back = rollback_apply("up-test", project, approve=True, tool_home=tool_home, skip_venv_refresh=True)
+
+    assert restored["status"] == "conflicts"
+    assert any("src/gtestcov/cli.py" in item for item in restored["conflicts"])
+    assert any("LOCAL_NOTES.md" in item for item in restored["actions"])
+    assert listed["upgrade_count"] == 1
+    assert rolled_back["status"] == "rolled_back"
+    assert rolled_back["venv_refresh"]["status"] == "skipped"
+    assert (project / ".gtestcov" / "runs" / "old-run" / "keep.txt").read_text(encoding="utf-8") == "old run evidence\n"
+    assert (tool_home / "current_slot").read_text(encoding="utf-8").strip() == inspected["old_tool_slot"]
+
+
+def test_upgrade_apply_blocks_invalid_memory_migration(tmp_path: Path) -> None:
+    old_tool = make_fake_tool_root(tmp_path, "old_tool", "old")
+    write_install_manifest(old_tool, build_install_manifest(old_tool, source="old.zip"))
+    new_tool = make_fake_tool_root(tmp_path, "new_tool", "new")
+    project = tmp_path / "cpp_project"
+    memory_dir = project / ".gtestcov" / "memory"
+    memory_dir.mkdir(parents=True)
+    (project / "project_profile.yaml").write_text("project_name: bad_memory\n", encoding="utf-8")
+    (memory_dir / "project_memory.json").write_text("{bad json", encoding="utf-8")
+    tool_home = tmp_path / "tool_home"
+
+    upgrade_inspect(
+        tool_root=old_tool,
+        project_root=project,
+        target_ref="v0.2.0",
+        install_mode="zip",
+        upgrade_id="bad-memory",
+        tool_home=tool_home,
+    )
+    applied = upgrade_apply(
+        upgrade_id="bad-memory",
+        approve_overwrite_tool_modifications=True,
+        tool_home=tool_home,
+        project_root=project,
+        source_tool_root=new_tool,
+        install_mode="zip",
+        skip_venv_refresh=True,
+    )
+
+    assert applied["status"] == "blocked"
+    assert "migration_report" in applied
+    assert Path(applied["migration_report"]).exists()
+
+
+def test_upgrade_apply_refreshes_reused_venv_when_provided(tmp_path: Path) -> None:
+    old_tool = make_fake_tool_root(tmp_path, "old_tool", "old")
+    write_install_manifest(old_tool, build_install_manifest(old_tool, source="old.zip"))
+    new_tool = make_fake_tool_root(tmp_path, "new_tool", "new")
+    project = tmp_path / "cpp_project"
+    (project / ".gtestcov").mkdir(parents=True)
+    (project / "project_profile.yaml").write_text("project_name: venv_refresh\n", encoding="utf-8")
+    tool_home = tmp_path / "tool_home"
+    log_path = tmp_path / "pip_args.json"
+    fake_python = tmp_path / "fake_python"
+    fake_python.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json\n"
+        "import pathlib\n"
+        "import sys\n"
+        f"pathlib.Path({str(log_path)!r}).write_text(json.dumps(sys.argv), encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+
+    upgrade_inspect(
+        tool_root=old_tool,
+        project_root=project,
+        target_ref="v0.2.0",
+        install_mode="zip",
+        upgrade_id="venv-refresh",
+        tool_home=tool_home,
+    )
+    applied = upgrade_apply(
+        upgrade_id="venv-refresh",
+        approve_overwrite_tool_modifications=True,
+        tool_home=tool_home,
+        project_root=project,
+        source_tool_root=new_tool,
+        install_mode="zip",
+        venv_path=fake_python,
+    )
+
+    pip_args = json.loads(log_path.read_text(encoding="utf-8"))
+    assert applied["status"] == "applied"
+    assert applied["venv_refresh"]["status"] == "refreshed"
+    assert pip_args[1:5] == ["-m", "pip", "install", "--no-deps"]
+    assert pip_args[-2] == "-e"
+    assert pip_args[-1] == applied["active_tool_path"]
+
+
+def test_upgrade_cli_refuses_apply_without_approval(tmp_path: Path) -> None:
+    old_tool = make_fake_tool_root(tmp_path, "old_tool", "old")
+    write_install_manifest(old_tool, build_install_manifest(old_tool, source="old.zip"))
+    project = tmp_path / "project"
+    (project / ".gtestcov").mkdir(parents=True)
+    (project / "project_profile.yaml").write_text("project_name: cli_upgrade\n", encoding="utf-8")
+    tool_home = tmp_path / "tool_home"
+
+    inspect_completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "gtestcov.cli",
+            "upgrade",
+            "inspect",
+            "--tool-root",
+            str(old_tool),
+            "--project-root",
+            str(project),
+            "--target-ref",
+            "v0.2.0",
+            "--install-mode",
+            "zip",
+            "--upgrade-id",
+            "cli-up",
+            "--tool-home",
+            str(tool_home),
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    apply_completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "gtestcov.cli",
+            "upgrade",
+            "apply",
+            "--upgrade-id",
+            "cli-up",
+            "--project-root",
+            str(project),
+            "--tool-home",
+            str(tool_home),
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    assert inspect_completed.returncode == 0
+    assert json.loads(inspect_completed.stdout)["status"] == "inspected"
+    assert apply_completed.returncode == 0
+    assert json.loads(apply_completed.stdout)["status"] == "refused"

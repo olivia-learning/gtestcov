@@ -17,7 +17,7 @@ def diagnose_failure(project_root: Path, run_id: str = "latest", target: str = "
     verify_path = run_dir / "verify.json"
     verify = json.loads(verify_path.read_text(encoding="utf-8")) if verify_path.exists() else {}
     request = build_failure_diagnosis_request(active_run_id, target, verify)
-    evidence = execute_codrax_request(root, profile.evidence.codrax, request, enabled=profile.evidence.codrax.enabled)
+    evidence = execute_codrax_request(root, profile.evidence.codrax, request, enabled=profile.evidence.codrax.enabled, run_dir=run_dir)
     write_codrax_evidence(run_dir, evidence)
     report_path = run_dir / "failure_diagnosis.md"
     report_path.write_text(render_failure_diagnosis(active_run_id, target, evidence), encoding="utf-8")

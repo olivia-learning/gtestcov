@@ -43,7 +43,7 @@ def preflight_check(
     codrax_violations: list[dict[str, str]] = []
     if include_codrax and profile.evidence.codrax.enabled:
         request = build_preflight_request(root, run_dir, active_run_id, target, violations)
-        evidence = execute_codrax_request(root, profile.evidence.codrax, request, enabled=True)
+        evidence = execute_codrax_request(root, profile.evidence.codrax, request, enabled=True, run_dir=run_dir)
         write_codrax_evidence(run_dir, evidence)
         codrax_violations = extract_codrax_preflight_blockers(evidence)
         violations.extend(codrax_violations)

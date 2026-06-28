@@ -106,6 +106,9 @@ def run_mcp_server() -> None:
         line_coverage: float | None = None,
         max_stagnant_rounds: int | None = None,
         min_improvement: float | None = None,
+        build_timeout: int | None = None,
+        test_timeout: int | None = None,
+        coverage_timeout: int | None = None,
     ) -> dict[str, Any]:
         """Run configured build/test/coverage commands and audit generated tests."""
         return verify_iteration(
@@ -115,6 +118,9 @@ def run_mcp_server() -> None:
             line_coverage,
             max_stagnant_rounds,
             min_improvement,
+            build_timeout,
+            test_timeout,
+            coverage_timeout,
         )
 
     @mcp.tool()

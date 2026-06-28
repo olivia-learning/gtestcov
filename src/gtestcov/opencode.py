@@ -36,12 +36,57 @@ Never skip the decision report. Never generate macros forbidden by the active pr
 """
 
 
+OPENCODE_INSTALL_COMMAND = """---
+description: Install gtestcov for an OpenCode workstation
+agent: build
+---
+
+Use `docs/install.md` from the gtestcov tool repository as the single source of truth.
+
+Required behavior:
+
+1. Ask the user only for install mode, tool directory, C++ project root, and branch/tag or zip path.
+2. Follow the "First Install" section in `docs/install.md`.
+3. Reuse an existing gtestcov virtual environment when one exists; create it only on first install.
+4. Run `gtestcov version`, `gtestcov install doctor`, `gtestcov init`, and `gtestcov codrax-check`.
+5. Write `<project-root>/.gtestcov/install_report.md`.
+
+Do not duplicate install rules here. Do not change system network, drivers, registry, WSL installation, Hyper-V, services, or virtualization settings. If the requested tool directory is not empty, stop and report before changing it.
+"""
+
+
+OPENCODE_UPGRADE_COMMAND = """---
+description: Upgrade gtestcov with old-version report, A/B slots, and rollback
+agent: build
+---
+
+Use `docs/install.md` from the gtestcov tool repository as the single source of truth.
+
+Required behavior:
+
+1. Follow the "Upgrade" section in `docs/install.md`.
+2. Always run `gtestcov upgrade inspect` first.
+3. Open and summarize `old_version_detection_report.md` for the user, then stop for approval.
+4. Only after approval, run `gtestcov upgrade apply --upgrade-id <id> --approve-overwrite-tool-modifications`.
+5. Check the returned `venv_refresh` field. If it says `needs_ai_action`, pass `--venv <existing-gtestcov-venv>` and continue; do not ask the user to type pip commands.
+6. For rollback, follow the "A/B Slots And Rollback" section in `docs/install.md` and require explicit user approval.
+
+Do not duplicate upgrade rules here. Do not carry old tool-source edits into the new version automatically. Do not delete or recreate the Python virtual environment unless the user approves that specific repair. Do not touch OS-level settings, WSL installation, network, drivers, registry, services, or virtualization settings.
+"""
+
+
 def write_opencode_files(project_root: Path, overwrite: bool = False) -> dict[str, str]:
     command_dir = project_root / ".opencode" / "commands"
     command_dir.mkdir(parents=True, exist_ok=True)
     command_path = command_dir / "gtest-cover.md"
     if overwrite or not command_path.exists():
         command_path.write_text(OPENCODE_COMMAND, encoding="utf-8")
+    install_path = command_dir / "gtestcov-install.md"
+    if overwrite or not install_path.exists():
+        install_path.write_text(OPENCODE_INSTALL_COMMAND, encoding="utf-8")
+    upgrade_path = command_dir / "gtestcov-upgrade.md"
+    if overwrite or not upgrade_path.exists():
+        upgrade_path.write_text(OPENCODE_UPGRADE_COMMAND, encoding="utf-8")
 
     gtestcov_dir = project_root / ".gtestcov"
     gtestcov_dir.mkdir(parents=True, exist_ok=True)
@@ -61,5 +106,7 @@ def write_opencode_files(project_root: Path, overwrite: bool = False) -> dict[st
 
     return {
         "command": str(command_path),
+        "install_command": str(install_path),
+        "upgrade_command": str(upgrade_path),
         "mcp_snippet": str(snippet_path),
     }
