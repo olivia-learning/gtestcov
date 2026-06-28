@@ -1,0 +1,216 @@
+<mxfile host="app.diagrams.net" modified="2026-06-29T00:00:00.000Z" agent="gtestcov" version="24.7.17">
+  <diagram id="gtestcov-workflow" name="gtestcov workflow">
+    <mxGraphModel dx="2200" dy="1700" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2300" pageHeight="1650" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="title" value="gtestcov：用 CODRAX 给弱 AI 套上测试生成轨道" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=26;fontStyle=1;fontColor=#172B4D;" vertex="1" parent="1">
+          <mxGeometry x="360" y="30" width="1500" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="subtitle" value="目标：用户给目标文件、覆盖率目标和编译入口；工具用 CODRAX 取证据，约束 OpenCode 写测试，先检查再编译，覆盖率不够再规划下一轮。" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=14;fontColor=#44546F;" vertex="1" parent="1">
+          <mxGeometry x="300" y="85" width="1620" height="50" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="stage_project" value="1. 项目理解与建档" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=15;fontStyle=1;fontColor=#5E6C84;" vertex="1" parent="1">
+          <mxGeometry x="80" y="135" width="360" height="30" as="geometry"/>
+        </mxCell>
+        <mxCell id="stage_task" value="2. 测试生成与编译前检查" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=15;fontStyle=1;fontColor=#5E6C84;" vertex="1" parent="1">
+          <mxGeometry x="230" y="385" width="420" height="30" as="geometry"/>
+        </mxCell>
+        <mxCell id="stage_verify" value="3. 验证、覆盖率判断与下一轮" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=15;fontStyle=1;fontColor=#5E6C84;" vertex="1" parent="1">
+          <mxGeometry x="720" y="935" width="460" height="30" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="user" value="用户给目标&#xa;目标文件 / 覆盖率目标 / 编译入口" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;fillColor=#E3FCEF;strokeColor=#36B37E;fontSize=14;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="80" y="170" width="300" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="codrax_check" value="确认 CODRAX 可用&#xa;先确认它能返回真实 file:line 证据" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;fillColor=#DEEBFF;strokeColor=#4C9AFF;fontSize=14;" vertex="1" parent="1">
+          <mxGeometry x="470" y="170" width="340" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="profile_sync" value="确认项目怎么编译和测试&#xa;查构建入口、测试命令、覆盖率命令、测试支撑路径" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;fillColor=#DEEBFF;strokeColor=#4C9AFF;fontSize=14;" vertex="1" parent="1">
+          <mxGeometry x="900" y="170" width="430" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="build_anchor" value="编译入口对得上吗？&#xa;用户给的入口要和 CODRAX 候选互相印证" style="rhombus;whiteSpace=wrap;html=1;fillColor=#FFF0B3;strokeColor=#FFAB00;fontSize=14;" vertex="1" parent="1">
+          <mxGeometry x="1500" y="155" width="300" height="150" as="geometry"/>
+        </mxCell>
+        <mxCell id="manual_review" value="停下来让人确认&#xa;证据不足或入口冲突时，不让弱 AI 猜" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;fillColor=#FFEBE6;strokeColor=#FF5630;fontSize=14;" vertex="1" parent="1">
+          <mxGeometry x="1900" y="170" width="340" height="110" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="permission" value="提前集中申请权限&#xa;OpenCode 先打开证据文件，只申请测试侧写权限" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;fillColor=#EAE6FF;strokeColor=#6554C0;fontSize=14;" vertex="1" parent="1">
+          <mxGeometry x="230" y="430" width="380" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="task" value="生成受控任务单&#xa;告诉弱 AI 能改哪里、不能改哪里、用例说明怎么写" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;fillColor=#EAE6FF;strokeColor=#6554C0;fontSize=14;" vertex="1" parent="1">
+          <mxGeometry x="720" y="430" width="390" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="profile" value="整理项目测试档案&#xa;把命令、可改路径、证据和风险写进 profile" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;fillColor=#EAE6FF;strokeColor=#6554C0;fontSize=14;" vertex="1" parent="1">
+          <mxGeometry x="1220" y="430" width="420" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="memory" value="刷新上下文记忆&#xa;handoff / resume prompt / project memory 只读" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;fillColor=#E3FCEF;strokeColor=#36B37E;fontSize=14;" vertex="1" parent="1">
+          <mxGeometry x="1220" y="575" width="420" height="90" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="ai_write" value="弱 AI 写测试&#xa;只能改测试、fake、harness、测试构建配置" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;fillColor=#F4F5F7;strokeColor=#6B778C;fontSize=14;" vertex="1" parent="1">
+          <mxGeometry x="230" y="700" width="380" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="preflight" value="编译前先检查&#xa;查写入范围、用例说明、坏写法、CODRAX 审计记录" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;fillColor=#F4F5F7;strokeColor=#6B778C;fontSize=14;" vertex="1" parent="1">
+          <mxGeometry x="720" y="700" width="390" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="preflight_ok" value="检查通过吗？" style="rhombus;whiteSpace=wrap;html=1;fillColor=#FFF0B3;strokeColor=#FFAB00;fontSize=14;" vertex="1" parent="1">
+          <mxGeometry x="1235" y="680" width="230" height="150" as="geometry"/>
+        </mxCell>
+        <mxCell id="fix" value="先修明显问题&#xa;根据修复任务只改测试侧内容" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;fillColor=#FFFAE6;strokeColor=#FFAB00;fontSize=14;" vertex="1" parent="1">
+          <mxGeometry x="1600" y="700" width="380" height="110" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="verify" value="正式验证&#xa;编译、跑测试、生成目标文件覆盖率" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;fillColor=#F4F5F7;strokeColor=#6B778C;fontSize=14;" vertex="1" parent="1">
+          <mxGeometry x="720" y="990" width="390" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="coverage_ok" value="覆盖率达标吗？" style="rhombus;whiteSpace=wrap;html=1;fillColor=#FFF0B3;strokeColor=#FFAB00;fontSize=14;" vertex="1" parent="1">
+          <mxGeometry x="1235" y="970" width="230" height="150" as="geometry"/>
+        </mxCell>
+        <mxCell id="done" value="完成&#xa;测试通过，目标文件覆盖率达到要求" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;fillColor=#E3FCEF;strokeColor=#36B37E;fontSize=14;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1600" y="990" width="380" height="110" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="next_task" value="生成下一轮任务&#xa;按覆盖率阶段继续补测试" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;fillColor=#EAE6FF;strokeColor=#6554C0;fontSize=14;" vertex="1" parent="1">
+          <mxGeometry x="230" y="1260" width="380" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="next_round" value="分析下一轮怎么补&#xa;CODRAX 看还缺哪些行为、分支或覆盖率链路" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;fillColor=#DEEBFF;strokeColor=#4C9AFF;fontSize=14;" vertex="1" parent="1">
+          <mxGeometry x="720" y="1260" width="390" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="stagnation" value="连续提升太小吗？" style="rhombus;whiteSpace=wrap;html=1;fillColor=#FFF0B3;strokeColor=#FFAB00;fontSize=14;" vertex="1" parent="1">
+          <mxGeometry x="1235" y="1240" width="230" height="150" as="geometry"/>
+        </mxCell>
+        <mxCell id="stop" value="停止自动推进&#xa;写停滞报告，让用户 review" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;fillColor=#FFEBE6;strokeColor=#FF5630;fontSize=14;" vertex="1" parent="1">
+          <mxGeometry x="1600" y="1260" width="380" height="110" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="label_mismatch" value="对不上" style="rounded=1;whiteSpace=wrap;html=1;arcSize=20;fillColor=#FFEBE6;strokeColor=#FF5630;fontSize=13;fontStyle=1;fontColor=#BF2600;spacing=2;" vertex="1" parent="1">
+          <mxGeometry x="1810" y="190" width="76" height="30" as="geometry"/>
+        </mxCell>
+        <mxCell id="label_match" value="对得上" style="rounded=1;whiteSpace=wrap;html=1;arcSize=20;fillColor=#E3FCEF;strokeColor=#36B37E;fontSize=13;fontStyle=1;fontColor=#006644;spacing=2;" vertex="1" parent="1">
+          <mxGeometry x="1555" y="350" width="76" height="30" as="geometry"/>
+        </mxCell>
+        <mxCell id="label_preflight_fail" value="不通过" style="rounded=1;whiteSpace=wrap;html=1;arcSize=20;fillColor=#FFFAE6;strokeColor=#FFAB00;fontSize=13;fontStyle=1;fontColor=#974F0C;spacing=2;" vertex="1" parent="1">
+          <mxGeometry x="1490" y="695" width="76" height="30" as="geometry"/>
+        </mxCell>
+        <mxCell id="label_fix_again" value="修完再检查" style="rounded=1;whiteSpace=wrap;html=1;arcSize=20;fillColor=#FFFAE6;strokeColor=#FFAB00;fontSize=13;fontStyle=1;fontColor=#974F0C;spacing=2;" vertex="1" parent="1">
+          <mxGeometry x="960" y="840" width="112" height="30" as="geometry"/>
+        </mxCell>
+        <mxCell id="label_preflight_pass" value="通过" style="rounded=1;whiteSpace=wrap;html=1;arcSize=20;fillColor=#E3FCEF;strokeColor=#36B37E;fontSize=13;fontStyle=1;fontColor=#006644;spacing=2;" vertex="1" parent="1">
+          <mxGeometry x="1170" y="905" width="64" height="30" as="geometry"/>
+        </mxCell>
+        <mxCell id="label_coverage_pass" value="达标" style="rounded=1;whiteSpace=wrap;html=1;arcSize=20;fillColor=#E3FCEF;strokeColor=#36B37E;fontSize=13;fontStyle=1;fontColor=#006644;spacing=2;" vertex="1" parent="1">
+          <mxGeometry x="1490" y="985" width="64" height="30" as="geometry"/>
+        </mxCell>
+        <mxCell id="label_coverage_miss" value="没达标" style="rounded=1;whiteSpace=wrap;html=1;arcSize=20;fillColor=#DEEBFF;strokeColor=#4C9AFF;fontSize=13;fontStyle=1;fontColor=#0747A6;spacing=2;" vertex="1" parent="1">
+          <mxGeometry x="1185" y="1150" width="76" height="30" as="geometry"/>
+        </mxCell>
+        <mxCell id="label_stagnation_yes" value="是" style="rounded=1;whiteSpace=wrap;html=1;arcSize=20;fillColor=#FFEBE6;strokeColor=#FF5630;fontSize=13;fontStyle=1;fontColor=#BF2600;spacing=2;" vertex="1" parent="1">
+          <mxGeometry x="1500" y="1255" width="44" height="30" as="geometry"/>
+        </mxCell>
+        <mxCell id="label_stagnation_no" value="否" style="rounded=1;whiteSpace=wrap;html=1;arcSize=20;fillColor=#E3FCEF;strokeColor=#36B37E;fontSize=13;fontStyle=1;fontColor=#006644;spacing=2;" vertex="1" parent="1">
+          <mxGeometry x="1040" y="1400" width="44" height="30" as="geometry"/>
+        </mxCell>
+        <mxCell id="label_continue" value="继续下一轮" style="rounded=1;whiteSpace=wrap;html=1;arcSize=20;fillColor=#EAE6FF;strokeColor=#6554C0;fontSize=13;fontStyle=1;fontColor=#403294;spacing=2;" vertex="1" parent="1">
+          <mxGeometry x="170" y="980" width="100" height="30" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#44546F;endArrow=block;endFill=1;" edge="1" parent="1" source="user" target="codrax_check">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#44546F;endArrow=block;endFill=1;" edge="1" parent="1" source="codrax_check" target="profile_sync">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#44546F;endArrow=block;endFill=1;" edge="1" parent="1" source="profile_sync" target="build_anchor">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e4" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#FF5630;endArrow=block;endFill=1;" edge="1" parent="1" source="build_anchor" target="manual_review">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#36B37E;endArrow=block;endFill=1;" edge="1" parent="1" source="build_anchor" target="profile">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1650" y="360"/>
+              <mxPoint x="1430" y="360"/>
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e6a" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#36B37E;endArrow=block;endFill=1;" edge="1" parent="1" source="profile" target="memory">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e6" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#44546F;endArrow=block;endFill=1;" edge="1" parent="1" source="memory" target="task">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e7" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#44546F;endArrow=block;endFill=1;" edge="1" parent="1" source="task" target="permission">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e8" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#44546F;endArrow=block;endFill=1;" edge="1" parent="1" source="permission" target="ai_write">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e9" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#44546F;endArrow=block;endFill=1;" edge="1" parent="1" source="ai_write" target="preflight">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e10" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#44546F;endArrow=block;endFill=1;" edge="1" parent="1" source="preflight" target="preflight_ok">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e11" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#FFAB00;endArrow=block;endFill=1;" edge="1" parent="1" source="preflight_ok" target="fix">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e12" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#FFAB00;endArrow=block;endFill=1;" edge="1" parent="1" source="fix" target="ai_write">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1790" y="885"/>
+              <mxPoint x="420" y="885"/>
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e13" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#36B37E;endArrow=block;endFill=1;" edge="1" parent="1" source="preflight_ok" target="verify">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1350" y="930"/>
+              <mxPoint x="915" y="930"/>
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e14" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#44546F;endArrow=block;endFill=1;" edge="1" parent="1" source="verify" target="coverage_ok">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e15" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#36B37E;endArrow=block;endFill=1;" edge="1" parent="1" source="coverage_ok" target="done">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e16" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#4C9AFF;endArrow=block;endFill=1;" edge="1" parent="1" source="coverage_ok" target="next_round">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1350" y="1190"/>
+              <mxPoint x="915" y="1190"/>
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e17" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#44546F;endArrow=block;endFill=1;" edge="1" parent="1" source="next_round" target="stagnation">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e18" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#FF5630;endArrow=block;endFill=1;" edge="1" parent="1" source="stagnation" target="stop">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e19" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#36B37E;endArrow=block;endFill=1;" edge="1" parent="1" source="stagnation" target="next_task">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1350" y="1480"/>
+              <mxPoint x="420" y="1480"/>
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e20" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#6554C0;endArrow=block;endFill=1;" edge="1" parent="1" source="next_task" target="ai_write">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="150" y="1315"/>
+              <mxPoint x="150" y="755"/>
+            </Array>
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

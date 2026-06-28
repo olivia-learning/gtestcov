@@ -1,0 +1,6 @@
+<dependencies>
+  <dependency name="EMAP" version="1.2.3" path="external/emap" />
+  <dependency name="OSAL" version="0.9.0" path="external/osal" />
+  <dependency name="HAL" version="0.5.0" path="external/hal" />
+  <dependency name="CRC_LIB" version="2.1.0" path="external/crc_lib" />
+</dependencies>

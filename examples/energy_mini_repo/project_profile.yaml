@@ -1,0 +1,42 @@
+project_name: energy_mini_repo
+language: c++
+test_framework: gtest
+mock_framework: gmock
+style:
+  preferred_macros:
+    - TEST
+    - TEST_F
+    - TEST_P
+  forbidden_macros:
+    - HWTEST
+    - HWTEST_F
+  fixture_naming: "{Target}Test"
+  test_file_suffix: "_test.cpp"
+build:
+  system: cmake
+  build_command: "cmake -S . -B build && cmake --build build"
+  test_command: "ctest --test-dir build --output-on-failure"
+  coverage_command: "gcovr -r . --xml -o coverage.xml"
+  coverage_xml: coverage.xml
+dependency:
+  manifest: dependency.xml
+  dependency_root:
+    - external
+  use_real_dependency_headers: true
+  host_shim_dir: tests/support/deps
+  exclude_from_coverage:
+    - external/.*
+    - tests/.*
+    - generated/.*
+test_support:
+  test_dirs:
+    - tests
+  fake_dir: tests/support/fakes
+  harness_dir: tests/support/harness
+  guard_dir: tests/support/guards
+  builder_dir: tests/support/builders
+  dependency_shim_dir: tests/support/deps
+coverage:
+  changed_line: 70.0
+  protocol_line: 80.0
+  max_iterations: 3
