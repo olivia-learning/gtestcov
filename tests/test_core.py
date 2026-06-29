@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import shutil
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import gtestcov.version as version_module
@@ -17,8 +19,18 @@ from gtestcov.discovery import discover_project
 from gtestcov.memory import refresh_memory, show_memory
 from gtestcov.preflight import preflight_check
 from gtestcov.profile_sync import profile_sync
+import gtestcov.profile_sync as profile_sync_module
 from gtestcov.profile import load_profile, profile_to_yaml
-from gtestcov.task import build_task
+from gtestcov.task import build_task, render_task
+from gtestcov.understanding import generate_project_understanding
+from gtestcov.models import (
+    AnalysisReport,
+    CodraxEvidence,
+    DependencyReport,
+    DiscoveryReport,
+    ProjectUnderstanding,
+    TargetFeatures,
+)
 from gtestcov.upgrade import (
     build_install_manifest,
     install_doctor,
@@ -40,6 +52,7 @@ MINI_REPO = REPO_ROOT / "examples" / "energy_mini_repo"
 def copy_mini_repo(tmp_path: Path) -> Path:
     dst = tmp_path / "energy_mini_repo"
     shutil.copytree(MINI_REPO, dst)
+    disable_codrax(dst)
     return dst
 
 
@@ -47,13 +60,45 @@ def write_fake_codrax(tmp_path: Path, output: str, returncode: int = 0) -> str:
     script = tmp_path / "fake_codrax.py"
     script.write_text(
         "import argparse\n"
+        "import pathlib\n"
         "import sys\n"
         "parser = argparse.ArgumentParser()\n"
         "parser.add_argument('--repo')\n"
         "parser.add_argument('--request')\n"
-        "parser.parse_args()\n"
-        f"sys.stdout.write({output!r})\n"
+        "parser.add_argument('--log-dir')\n"
+        "args = parser.parse_args()\n"
+        f"output = {output!r}\n"
+        "if args.log_dir:\n"
+        "    log_dir = pathlib.Path(args.log_dir)\n"
+        "    log_dir.mkdir(parents=True, exist_ok=True)\n"
+        "    (log_dir / 'fake_codrax.log').write_text(output, encoding='utf-8')\n"
+        "sys.stdout.write(output)\n"
         f"sys.exit({returncode})\n",
+        encoding="utf-8",
+    )
+    return f'"{sys.executable}" "{script}"'
+
+
+def write_fake_codrax_build_anchor_retry(tmp_path: Path) -> str:
+    script = tmp_path / "fake_codrax_anchor_retry.py"
+    script.write_text(
+        "import argparse\n"
+        "import pathlib\n"
+        "import sys\n"
+        "parser = argparse.ArgumentParser()\n"
+        "parser.add_argument('--repo')\n"
+        "parser.add_argument('--request')\n"
+        "parser.add_argument('--log-dir')\n"
+        "args = parser.parse_args()\n"
+        "if args.log_dir:\n"
+        "    log_dir = pathlib.Path(args.log_dir)\n"
+        "    log_dir.mkdir(parents=True, exist_ok=True)\n"
+        "    (log_dir / 'fake_codrax.log').write_text(args.request, encoding='utf-8')\n"
+        "if 'build-file anchor verification' in args.request:\n"
+        "    sys.stdout.write('build.candidate_build_files: CMakeLists.txt  # CMakeLists.txt:1\\n')\n"
+        "else:\n"
+        "    sys.stdout.write('profile fields not visible yet\\n')\n"
+        "sys.exit(0)\n",
         encoding="utf-8",
     )
     return f'"{sys.executable}" "{script}"'
@@ -63,19 +108,58 @@ def write_fake_streaming_codrax(tmp_path: Path, events: list[tuple[str, str, flo
     script = tmp_path / "fake_codrax_streaming.py"
     script.write_text(
         "import argparse\n"
+        "import pathlib\n"
         "import sys\n"
         "import time\n"
         "parser = argparse.ArgumentParser()\n"
         "parser.add_argument('--repo')\n"
         "parser.add_argument('--request')\n"
-        "parser.parse_args()\n"
+        "parser.add_argument('--log-dir')\n"
+        "args = parser.parse_args()\n"
+        "log_file = None\n"
+        "if args.log_dir:\n"
+        "    log_dir = pathlib.Path(args.log_dir)\n"
+        "    log_dir.mkdir(parents=True, exist_ok=True)\n"
+        "    log_file = log_dir / 'fake_codrax_streaming.log'\n"
         f"events = {events!r}\n"
         "for stream, text, delay in events:\n"
         "    target = sys.stderr if stream == 'stderr' else sys.stdout\n"
         "    print(text, file=target, flush=True)\n"
+        "    if log_file:\n"
+        "        with log_file.open('a', encoding='utf-8') as handle:\n"
+        "            handle.write(f'[{stream}] {text}\\n')\n"
         "    if delay:\n"
         "        time.sleep(delay)\n"
         f"sys.exit({returncode})\n",
+        encoding="utf-8",
+    )
+    return f'"{sys.executable}" "{script}"'
+
+
+def write_fake_long_running_codrax(tmp_path: Path) -> str:
+    script = tmp_path / "fake_codrax_long.py"
+    script.write_text(
+        "import argparse\n"
+        "import pathlib\n"
+        "import sys\n"
+        "import time\n"
+        "parser = argparse.ArgumentParser()\n"
+        "parser.add_argument('--repo')\n"
+        "parser.add_argument('--request')\n"
+        "parser.add_argument('--log-dir')\n"
+        "args = parser.parse_args()\n"
+        "log_file = None\n"
+        "if args.log_dir:\n"
+        "    log_dir = pathlib.Path(args.log_dir)\n"
+        "    log_dir.mkdir(parents=True, exist_ok=True)\n"
+        "    log_file = log_dir / 'fake_codrax_long.log'\n"
+        "for index in range(300):\n"
+        "    line = f'heartbeat {index}: src/energy_service.cpp:1 still working'\n"
+        "    print(line, flush=True)\n"
+        "    if log_file:\n"
+        "        with log_file.open('a', encoding='utf-8') as handle:\n"
+        "            handle.write(line + '\\n')\n"
+        "    time.sleep(0.2)\n",
         encoding="utf-8",
     )
     return f'"{sys.executable}" "{script}"'
@@ -93,6 +177,7 @@ def write_fake_codrax_alt_cli(tmp_path: Path) -> str:
         "parser.add_argument('command')\n"
         "parser.add_argument('--path')\n"
         "parser.add_argument('--prompt')\n"
+        "parser.add_argument('--log-dir')\n"
         "args = parser.parse_args()\n"
         "if args.command != 'ask' or not args.path or not args.prompt:\n"
         "    print('bad invocation', file=sys.stderr)\n"
@@ -115,6 +200,7 @@ def write_fake_codrax_template_only(tmp_path: Path) -> str:
         "parser.add_argument('command')\n"
         "parser.add_argument('--root')\n"
         "parser.add_argument('--question')\n"
+        "parser.add_argument('--log-dir')\n"
         "args = parser.parse_args()\n"
         "if args.command != 'probe' or not args.root or not args.question:\n"
         "    print('bad template invocation', file=sys.stderr)\n"
@@ -132,6 +218,12 @@ def enable_codrax(root: Path, command: str) -> None:
     (root / "project_profile.yaml").write_text(profile_to_yaml(profile), encoding="utf-8")
 
 
+def disable_codrax(root: Path) -> None:
+    profile = load_profile(root)
+    profile.evidence.codrax.enabled = False
+    (root / "project_profile.yaml").write_text(profile_to_yaml(profile), encoding="utf-8")
+
+
 def test_profile_and_discovery_on_mini_repo(tmp_path: Path) -> None:
     root = copy_mini_repo(tmp_path)
     profile = load_profile(root)
@@ -143,6 +235,13 @@ def test_profile_and_discovery_on_mini_repo(tmp_path: Path) -> None:
     assert discovery.inferred_build_system == "cmake"
     assert discovery.test_macros["TEST"] >= 2
     assert any(path.endswith("tests/support/fakes") for path in discovery.support_dirs["fake"])
+
+
+def test_default_profile_enables_codrax() -> None:
+    profile = load_profile(Path("__missing_project_profile__"))
+
+    assert profile.evidence.codrax.enabled is True
+    assert profile.evidence.codrax.command == "codrax"
 
 
 def test_discovery_does_not_embed_project_specific_build_detection(tmp_path: Path) -> None:
@@ -440,7 +539,7 @@ def test_codrax_unavailable_falls_back_to_static_analysis(tmp_path: Path) -> Non
     analysis = analyze_target(root, "src/energy_service.cpp", run_id="codrax-missing")
     decision = (root / ".gtestcov" / "runs" / "codrax-missing" / "decision_report.md").read_text(encoding="utf-8")
 
-    assert analysis.codrax_evidence.status == "unavailable"
+    assert analysis.codrax_evidence.status == "command_not_found"
     assert "codrax_evidence_needs_manual_review" in {item.obligation_id for item in analysis.test_obligations}
     assert "Lifecycle Test" in analysis.selected_test_type
     assert "weak AI must not invent missing dependencies" in decision
@@ -457,7 +556,7 @@ def test_codrax_check_and_evidence_cli_with_fake_command(tmp_path: Path) -> None
     )
     enable_codrax(root, command)
 
-    check = codrax_check(root)
+    check = codrax_check(root, run_id="codrax-check-unit")
     evidence = subprocess.run(
         [
             sys.executable,
@@ -476,19 +575,45 @@ def test_codrax_check_and_evidence_cli_with_fake_command(tmp_path: Path) -> None
         capture_output=True,
     )
     cli_check = subprocess.run(
-        [sys.executable, "-m", "gtestcov.cli", "codrax-check", "--project-root", str(root)],
+        [
+            sys.executable,
+            "-m",
+            "gtestcov.cli",
+            "codrax-check",
+            "--project-root",
+            str(root),
+            "--run-id",
+            "codrax-check-cli",
+        ],
         check=False,
         text=True,
         capture_output=True,
     )
+    check_run_dir = root / ".gtestcov" / "runs" / "codrax-check-unit"
+    cli_run_dir = root / ".gtestcov" / "runs" / "codrax-check-cli"
 
     assert check["status"] == "ok"
+    assert check["run_id"] == "codrax-check-unit"
+    assert Path(check["status_path"]).exists()
+    assert Path(check["final_log_path"]).exists()
     assert "CMakeLists.txt:1" in check["file_line_refs"]
+    assert (check_run_dir / "codrax_check.json").exists()
+    assert (check_run_dir / "gtestcov_status.json").exists()
+    assert (check_run_dir / "codrax_final_outputs" / "index.json").exists()
     assert evidence.returncode == 0
     assert json.loads(evidence.stdout)["status"] == "ok"
-    assert (root / ".gtestcov" / "runs" / "evidence-cli" / "codrax_evidence.json").exists()
+    evidence_run_dir = root / ".gtestcov" / "runs" / "evidence-cli"
+    assert (evidence_run_dir / "codrax_evidence.json").exists()
+    evidence_status = json.loads((evidence_run_dir / "gtestcov_status.json").read_text(encoding="utf-8"))
+    assert evidence_status["phase"] == "evidence.done"
+    assert evidence_status["codrax_status"] == "ok"
     assert cli_check.returncode == 0
-    assert json.loads(cli_check.stdout)["status"] == "ok"
+    cli_check_data = json.loads(cli_check.stdout)
+    assert cli_check_data["status"] == "ok"
+    assert cli_check_data["run_id"] == "codrax-check-cli"
+    assert (cli_run_dir / "codrax_check.json").exists()
+    assert (cli_run_dir / "gtestcov_status.json").exists()
+    assert (cli_run_dir / "codrax_final_outputs" / "index.json").exists()
 
 
 def test_codrax_auto_discovers_alternate_cli_protocol(tmp_path: Path) -> None:
@@ -520,9 +645,10 @@ def test_codrax_args_template_handles_unrecognized_cli_protocol(tmp_path: Path) 
     assert analysis.codrax_evidence.invocation == "args_template"
     assert "src/energy_service.cpp:12" in analysis.codrax_evidence.file_line_refs
     assert check["discovery"]["selected_invocation"] == "args_template"
+    assert check["discovery"]["help_probes"] == []
 
 
-def test_codrax_streams_live_log_for_run_artifacts(tmp_path: Path) -> None:
+def test_codrax_records_native_log_status_and_final_summary(tmp_path: Path) -> None:
     root = copy_mini_repo(tmp_path)
     command = write_fake_streaming_codrax(
         tmp_path,
@@ -541,16 +667,63 @@ def test_codrax_streams_live_log_for_run_artifacts(tmp_path: Path) -> None:
 
     evidence, _ = generate_codrax_evidence(root, "src/energy_service.cpp", run_id="codrax-live")
 
-    live_log = Path(evidence.live_log_path)
-    log_text = live_log.read_text(encoding="utf-8")
+    status_path = Path(evidence.status_path)
+    native_log_dir = Path(evidence.native_log_dir)
+    final_log = Path(evidence.final_log_path)
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    native_text = "\n".join(path.read_text(encoding="utf-8") for path in native_log_dir.rglob("*") if path.is_file())
+    final_text = final_log.read_text(encoding="utf-8")
+
     assert evidence.status == "ok"
     assert evidence.timeout_kind == ""
     assert "src/energy_service.cpp:12" in evidence.file_line_refs
-    assert live_log.exists()
-    assert "CODRAX live output captured by gtestcov" in log_text
-    assert "progress: indexing" in log_text
-    assert evidence.live_log_truncated is False
-    assert evidence.live_log_size_bytes == live_log.stat().st_size
+    assert evidence.final_log_path
+    assert status["status"] == "ok"
+    assert native_log_dir.exists()
+    assert evidence.native_log_files
+    assert "progress: indexing" in native_text
+    assert final_log.exists()
+    assert "CODRAX Final Diagnostic Log" in final_text
+    assert "progress: indexing" in final_text
+    assert evidence.final_log_truncated is False
+    assert evidence.final_log_size_bytes == final_log.stat().st_size
+
+
+def test_codrax_long_running_with_activity_completes_and_records_outer_status(tmp_path: Path) -> None:
+    root = copy_mini_repo(tmp_path)
+    command = write_fake_streaming_codrax(
+        tmp_path,
+        [
+            ("stdout", "- phase 1: src/energy_service.cpp:12 indexing target.", 0.45),
+            ("stderr", "progress: native log says repo map is still active", 0.45),
+            ("stdout", "- phase 2: tests/energy_service_component_test.cpp:20 checking harness.", 0.45),
+            ("stderr", "progress: native log says final answer is being prepared", 0.45),
+            ("stdout", "- final: src/energy_service.cpp:18 cites shutdown behavior.", 0),
+        ],
+    )
+    profile = load_profile(root)
+    profile.evidence.codrax.enabled = True
+    profile.evidence.codrax.command = command
+    profile.evidence.codrax.idle_timeout_seconds = 1
+    profile.evidence.codrax.max_runtime_seconds = 10
+    (root / "project_profile.yaml").write_text(profile_to_yaml(profile), encoding="utf-8")
+
+    understanding, _ = generate_project_understanding(root, "src/energy_service.cpp", run_id="codrax-long-complete")
+
+    run_dir = root / ".gtestcov" / "runs" / "codrax-long-complete"
+    codrax_status = json.loads((run_dir / "codrax_status.json").read_text(encoding="utf-8"))
+    run_status = json.loads((run_dir / "gtestcov_status.json").read_text(encoding="utf-8"))
+    index = json.loads((run_dir / "codrax_final_outputs" / "index.json").read_text(encoding="utf-8"))
+
+    assert understanding.status == "ok"
+    assert codrax_status["status"] == "ok"
+    assert codrax_status["phase"] == "done"
+    assert codrax_status["elapsed_seconds"] >= 1
+    assert codrax_status["timeout_kind"] == ""
+    assert run_status["phase"] == "evidence.done"
+    assert run_status["codrax_status"] == "ok"
+    assert index[-1]["status"] == "ok"
+    assert Path(index[-1]["final_log_path"]).exists()
 
 
 def test_codrax_idle_timeout_uses_activity_not_fixed_request_timeout(tmp_path: Path) -> None:
@@ -568,10 +741,12 @@ def test_codrax_idle_timeout_uses_activity_not_fixed_request_timeout(tmp_path: P
 
     evidence, _ = generate_codrax_evidence(root, "src/energy_service.cpp", run_id="codrax-idle")
 
-    assert evidence.status == "timeout"
+    assert evidence.status == "idle_timeout"
     assert evidence.timeout_kind == "idle"
     assert "no output for 1 seconds" in " ".join(evidence.notes)
-    assert Path(evidence.live_log_path).exists()
+    assert Path(evidence.status_path).exists()
+    assert Path(evidence.final_log_path).exists()
+    assert json.loads(Path(evidence.status_path).read_text(encoding="utf-8"))["status"] == "idle_timeout"
 
 
 def test_codrax_max_runtime_timeout_stops_chatty_process(tmp_path: Path) -> None:
@@ -590,13 +765,68 @@ def test_codrax_max_runtime_timeout_stops_chatty_process(tmp_path: Path) -> None
 
     evidence, _ = generate_codrax_evidence(root, "src/energy_service.cpp", run_id="codrax-max")
 
-    assert evidence.status == "timeout"
+    assert evidence.status == "max_runtime_timeout"
     assert evidence.timeout_kind == "max_runtime"
     assert "max runtime of 1 seconds" in " ".join(evidence.notes)
-    assert Path(evidence.live_log_path).exists()
+    assert Path(evidence.status_path).exists()
+    assert Path(evidence.final_log_path).exists()
+    assert json.loads(Path(evidence.status_path).read_text(encoding="utf-8"))["status"] == "max_runtime_timeout"
 
 
-def test_codrax_live_log_is_bounded_and_keeps_tail(tmp_path: Path) -> None:
+def test_codrax_signal_termination_records_final_log(tmp_path: Path) -> None:
+    root = copy_mini_repo(tmp_path)
+    enable_codrax(root, write_fake_long_running_codrax(tmp_path))
+    env = {**dict(subprocess.os.environ), "PYTHONPATH": str(REPO_ROOT / "src")}
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "gtestcov.cli",
+            "evidence",
+            "--project-root",
+            str(root),
+            "--target",
+            "src/energy_service.cpp",
+            "--run-id",
+            "signal-stop",
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    status_path = root / ".gtestcov" / "runs" / "signal-stop" / "codrax_status.json"
+    for _ in range(100):
+        if status_path.exists():
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+            if status.get("status") == "running":
+                break
+        time.sleep(0.05)
+    else:
+        proc.kill()
+        proc.wait(timeout=5)
+        raise AssertionError("CODRAX status did not enter running state")
+
+    proc.send_signal(signal.SIGTERM)
+    stdout, stderr = proc.communicate(timeout=10)
+
+    assert proc.returncode in {128 + signal.SIGTERM, -signal.SIGTERM}, (stdout, stderr)
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    assert status["status"] == "terminated_by_signal"
+    assert status["phase"] == "interrupted"
+    assert status["final_log_path"]
+    final_log = Path(status["final_log_path"]).read_text(encoding="utf-8")
+    assert "terminated_by_signal" in final_log
+    index_path = root / ".gtestcov" / "runs" / "signal-stop" / "codrax_final_outputs" / "index.json"
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    assert index[-1]["status"] == "terminated_by_signal"
+    run_status = json.loads((root / ".gtestcov" / "runs" / "signal-stop" / "gtestcov_status.json").read_text(encoding="utf-8"))
+    assert run_status["phase"] == "codrax.interrupted"
+    assert run_status["codrax_status"] == "terminated_by_signal"
+
+
+def test_codrax_final_log_is_bounded_and_keeps_tail(tmp_path: Path) -> None:
     root = copy_mini_repo(tmp_path)
     events = [("stdout", "- early build anchor: CMakeLists.txt:1 dependency evidence", 0)] + [
         ("stdout", f"- trace {index}: src/energy_service.cpp:{12 + index % 3} dependency detail " + ("x" * 40), 0)
@@ -606,23 +836,44 @@ def test_codrax_live_log_is_bounded_and_keeps_tail(tmp_path: Path) -> None:
     profile = load_profile(root)
     profile.evidence.codrax.enabled = True
     profile.evidence.codrax.command = command
-    profile.evidence.codrax.live_log_max_bytes = 700
-    profile.evidence.codrax.live_log_keep_tail_bytes = 180
+    profile.evidence.codrax.final_log_max_bytes = 700
+    profile.evidence.codrax.native_log_tail_bytes = 4000
     profile.evidence.codrax.max_output_chars = 4000
     (root / "project_profile.yaml").write_text(profile_to_yaml(profile), encoding="utf-8")
 
     evidence, _ = generate_codrax_evidence(root, "src/energy_service.cpp", run_id="codrax-trim")
 
-    live_log = Path(evidence.live_log_path)
-    log_text = live_log.read_text(encoding="utf-8", errors="replace")
+    final_log = Path(evidence.final_log_path)
+    log_text = final_log.read_text(encoding="utf-8", errors="replace")
     assert evidence.status == "ok"
-    assert evidence.live_log_truncated is True
-    assert evidence.dropped_log_bytes > 0
-    assert evidence.live_log_size_bytes <= profile.evidence.codrax.live_log_max_bytes
+    assert evidence.final_log_truncated is True
+    assert evidence.final_log_size_bytes <= profile.evidence.codrax.final_log_max_bytes
     assert "CMakeLists.txt:1" in evidence.file_line_refs
-    assert "[gtestcov] live log truncated" in log_text
+    assert "[gtestcov] final CODRAX diagnostic log truncated" in log_text
     assert "trace 79" in log_text
     assert "trace 0" not in log_text
+
+
+def test_codrax_file_line_evidence_comes_from_final_stdout_not_native_log(tmp_path: Path) -> None:
+    root = copy_mini_repo(tmp_path)
+    command = write_fake_streaming_codrax(
+        tmp_path,
+        [
+            ("stderr", "internal prompt mentions src/energy_service.cpp:12 but final answer does not cite it", 0),
+            ("stdout", "I cannot cite a repository file line from the final answer.", 0),
+        ],
+    )
+    profile = load_profile(root)
+    profile.evidence.codrax.enabled = True
+    profile.evidence.codrax.command = command
+    profile.evidence.codrax.require_file_line = True
+    (root / "project_profile.yaml").write_text(profile_to_yaml(profile), encoding="utf-8")
+
+    evidence, _ = generate_codrax_evidence(root, "src/energy_service.cpp", run_id="codrax-final-only")
+
+    assert evidence.status == "insufficient"
+    assert evidence.file_line_refs == []
+    assert Path(evidence.final_log_path).exists()
 
 
 def test_profile_sync_updates_profile_with_codrax_evidence(tmp_path: Path) -> None:
@@ -684,6 +935,94 @@ def test_profile_sync_stops_when_user_build_file_conflicts_with_codrax(tmp_path:
     assert "Build File Anchor Comparison" in Path(result["profile_evidence_path"]).read_text(encoding="utf-8")
 
 
+def test_profile_sync_accepts_user_build_file_cited_in_codrax_final_output(tmp_path: Path) -> None:
+    root = copy_mini_repo(tmp_path)
+    command = write_fake_codrax(
+        tmp_path,
+        """
+The target uses the user-provided build file `CMakeLists.txt`; it registers the unit test at CMakeLists.txt:1.
+No strict field list was emitted.
+""",
+    )
+    enable_codrax(root, command)
+
+    result = profile_sync(root, "src/energy_service.cpp", run_id="profile-sync-prose-candidate", line_coverage=82, build_file="CMakeLists.txt")
+    profile = load_profile(root)
+    run_dir = root / ".gtestcov" / "runs" / "profile-sync-prose-candidate"
+
+    assert result["status"] == "ok"
+    assert result["updated"] is True
+    assert result["build_file_comparison"]["status"] == "matched"
+    assert result["updates"]["build.candidate_build_files"]["source"] == "codrax_final_output_fallback"
+    assert profile.build.build_file == "CMakeLists.txt"
+    assert profile.build.candidate_build_files == ["CMakeLists.txt"]
+    assert not (run_dir / "manual_review_needed.md").exists()
+
+
+def test_profile_sync_derives_test_dirs_from_codrax_existing_harness_evidence(tmp_path: Path) -> None:
+    root = copy_mini_repo(tmp_path)
+    command = write_fake_codrax(
+        tmp_path,
+        """
+- build.candidate_build_files: CMakeLists.txt # CMakeLists.txt:1
+
+Existing tests and harnesses:
+- tests/energy_service_component_test.cpp:1 defines a GoogleTest component harness for this target.
+- tests/support/fakes/fake_hal.hpp:1 provides a fake hardware boundary used by the tests.
+- cmake/API.cmake:542 defines a unit test build helper and must remain build evidence only.
+""",
+    )
+    enable_codrax(root, command)
+
+    result = profile_sync(root, "src/energy_service.cpp", run_id="profile-sync-test-dir-fallback", line_coverage=82, build_file="CMakeLists.txt")
+    profile = load_profile(root)
+
+    assert result["status"] == "ok"
+    assert result["updated"] is True
+    assert profile.test_support.test_dirs == ["tests"]
+    assert result["updates"]["test_support.test_dirs"]["source"] == "codrax_existing_tests_fallback"
+    assert result["updates"]["test_support.test_dirs"]["evidence"] == ["tests/energy_service_component_test.cpp:1"]
+
+
+def test_profile_sync_reasks_codrax_when_build_file_candidates_are_missing(tmp_path: Path) -> None:
+    root = copy_mini_repo(tmp_path)
+    enable_codrax(root, write_fake_codrax_build_anchor_retry(tmp_path))
+
+    result = profile_sync(root, "src/energy_service.cpp", run_id="profile-sync-anchor-retry", line_coverage=82, build_file="CMakeLists.txt")
+    profile = load_profile(root)
+    run_dir = root / ".gtestcov" / "runs" / "profile-sync-anchor-retry"
+    index = json.loads((run_dir / "codrax_final_outputs" / "index.json").read_text(encoding="utf-8"))
+
+    assert result["status"] == "ok"
+    assert result["updated"] is True
+    assert result["build_file_comparison"]["status"] == "matched"
+    assert profile.build.build_file == "CMakeLists.txt"
+    assert profile.build.candidate_build_files == ["CMakeLists.txt"]
+    assert {entry["operation"] for entry in index} >= {"profile_sync", "profile_sync_build_file_anchor"}
+
+
+def test_profile_sync_backup_falls_back_when_copy_metadata_fails(tmp_path: Path, monkeypatch) -> None:
+    root = copy_mini_repo(tmp_path)
+    command = write_fake_codrax(
+        tmp_path,
+        """
+- build.candidate_build_files: CMakeLists.txt # CMakeLists.txt:1
+""",
+    )
+    enable_codrax(root, command)
+
+    def fail_copy2(_src, _dst):
+        raise PermissionError("metadata copy denied")
+
+    monkeypatch.setattr(profile_sync_module.shutil, "copy2", fail_copy2)
+    result = profile_sync(root, "src/energy_service.cpp", run_id="profile-sync-copy-fallback", line_coverage=82, build_file="CMakeLists.txt")
+
+    assert result["status"] == "ok"
+    backup = Path(result["backup_path"])
+    assert backup.exists()
+    assert backup.read_text(encoding="utf-8")
+
+
 def test_build_file_anchor_comparison_is_case_sensitive(tmp_path: Path) -> None:
     root = copy_mini_repo(tmp_path)
     command = write_fake_codrax(
@@ -743,8 +1082,28 @@ def test_cover_builds_single_file_task_with_coverage_goal(tmp_path: Path) -> Non
     enable_codrax(root, command)
 
     result = cover_target(root, "src/energy_service.cpp", line_coverage=88, run_id="cover", build_file="CMakeLists.txt")
+    run_dir = root / ".gtestcov" / "runs" / "cover"
     task = Path(result["task_path"]).read_text(encoding="utf-8")
-    goal = json.loads((root / ".gtestcov" / "runs" / "cover" / "coverage_goal.json").read_text(encoding="utf-8"))
+    goal = json.loads((run_dir / "coverage_goal.json").read_text(encoding="utf-8"))
+    status = json.loads((run_dir / "gtestcov_status.json").read_text(encoding="utf-8"))
+    events = [json.loads(line)["phase"] for line in (run_dir / "gtestcov_events.ndjson").read_text(encoding="utf-8").splitlines() if line.strip()]
+    final_output_index = json.loads((run_dir / "codrax_final_outputs" / "index.json").read_text(encoding="utf-8"))
+    final_output_logs = sorted((run_dir / "codrax_final_outputs").glob("*.md"))
+    cli_status = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "gtestcov.cli",
+            "status",
+            "--project-root",
+            str(root),
+            "--run-id",
+            "cover",
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
 
     assert result["status"] == "task_ready"
     assert goal == {
@@ -756,6 +1115,47 @@ def test_cover_builds_single_file_task_with_coverage_goal(tmp_path: Path) -> Non
     assert "CMakeLists.txt" in task
     assert "User build file anchor" in task
     assert "Do not edit the target file `src/energy_service.cpp`" in task
+    assert status["phase"] == "cover.task_ready"
+    assert "cover.start" in events
+    assert "profile_sync.start" in events
+    assert "analyze.codrax_understanding" in events
+    assert "task.done" in events
+    assert events.count("codrax.finished") >= 2
+    assert len(final_output_logs) >= 2
+    assert {entry["operation"] for entry in final_output_index} >= {"profile_sync", "project_understanding"}
+    assert all(Path(entry["final_log_path"]).exists() for entry in final_output_index)
+    assert cli_status.returncode == 0
+    assert json.loads(cli_status.stdout)["gtestcov_status"]["phase"] == "cover.task_ready"
+
+
+def test_task_allowed_paths_include_codrax_cited_test_dirs_from_project_understanding() -> None:
+    profile = load_profile(Path("__missing_project_profile__"))
+    evidence = CodraxEvidence(
+        status="ok",
+        harnesses=[
+            "Existing test harness is Svc/ActiveRateGroup/test/ut/ActiveRateGroupTestMain.cpp:49.",
+            "Build helper cmake/API.cmake:542 mentions unit tests but is not a test source directory.",
+        ],
+    )
+    analysis = AnalysisReport(
+        run_id="run",
+        target="Svc/ActiveRateGroup/ActiveRateGroup.cpp",
+        project_style=DiscoveryReport(project_root="."),
+        dependency_resolution=DependencyReport(),
+        observed_features=TargetFeatures(target="Svc/ActiveRateGroup/ActiveRateGroup.cpp"),
+        observed_symbols=[],
+        selected_test_type="Component Test",
+        reason=[],
+        required_support=[],
+        safety_risks=[],
+        planned_files=[],
+        project_understanding=ProjectUnderstanding(codrax_evidence=evidence),
+    )
+
+    task = render_task(analysis, profile, line_coverage=70)
+
+    assert "- Svc/ActiveRateGroup/test/ut" in task
+    assert "- cmake" not in task
 
 
 def test_memory_layer_writes_context_handoff_and_project_memory(tmp_path: Path) -> None:
@@ -830,16 +1230,25 @@ build:
 def test_verify_uses_filtered_commands_and_target_file_coverage(tmp_path: Path) -> None:
     root = tmp_path / "project"
     root.mkdir()
+    build_script = root / "build_cmd.py"
+    test_script = root / "test_cmd.py"
+    coverage_script = root / "coverage_cmd.py"
+    build_script.write_text("print('incremental build')\n", encoding="utf-8")
+    test_script.write_text("print('filtered test')\n", encoding="utf-8")
+    coverage_script.write_text("print('target coverage')\n", encoding="utf-8")
     (root / "project_profile.yaml").write_text(
         f"""
 project_name: verify_project
 build:
-  incremental_build_command: '"{sys.executable}" -c "print(\\"incremental build\\")"'
-  filtered_test_command: '"{sys.executable}" -c "print(\\"filtered test\\")"'
-  target_coverage_command: '"{sys.executable}" -c "print(\\"target coverage\\")"'
+  incremental_build_command: '"{sys.executable}" "{build_script}"'
+  filtered_test_command: '"{sys.executable}" "{test_script}"'
+  target_coverage_command: '"{sys.executable}" "{coverage_script}"'
   coverage_xml: coverage.xml
 targets:
   default_line_coverage: 80.0
+evidence:
+  codrax:
+    enabled: false
 """,
         encoding="utf-8",
     )
@@ -867,6 +1276,7 @@ def test_verify_command_timeout_is_reported_and_cli_override_works(tmp_path: Pat
     profile = load_profile(root)
     profile.build.build_command = f'"{sys.executable}" -c "import time; print(\'build started\', flush=True); time.sleep(2)"'
     profile.build.build_timeout_seconds = 30
+    profile.evidence.codrax.enabled = False
     (root / "project_profile.yaml").write_text(profile_to_yaml(profile), encoding="utf-8")
 
     cli = subprocess.run(
@@ -911,6 +1321,7 @@ def make_coverage_project(tmp_path: Path, codrax_command: str = "") -> Path:
     root.mkdir()
     profile = load_profile(root)
     profile.build.coverage_xml = "coverage.xml"
+    profile.evidence.codrax.enabled = False
     if codrax_command:
         profile.evidence.codrax.enabled = True
         profile.evidence.codrax.command = codrax_command
@@ -1015,8 +1426,22 @@ def test_next_round_with_codrax_unavailable_is_conservative(tmp_path: Path) -> N
     analysis = (root / ".gtestcov" / "runs" / "coverage-loop" / "next_round_analysis.md").read_text(encoding="utf-8")
 
     assert verify["next_round"]["status"] == "next_task_ready"
-    assert verify["next_round"]["codrax_evidence"]["status"] == "unavailable"
+    assert verify["next_round"]["codrax_evidence"]["status"] == "command_not_found"
     assert "CODRAX Evidence" in analysis
+
+
+def test_verify_stops_next_round_when_verification_commands_are_not_configured(tmp_path: Path) -> None:
+    root = make_coverage_project(tmp_path)
+
+    verify = verify_iteration(root, run_id="coverage-loop")
+    run_dir = root / ".gtestcov" / "runs" / "coverage-loop"
+
+    assert verify["coverage"]["found"] is False
+    assert verify["next_round"]["status"] == "verification_not_configured"
+    assert verify["next_round"]["codrax_evidence"]["status"] == "skipped_verification_not_configured"
+    assert (run_dir / "manual_review_needed.md").exists()
+    assert not (run_dir / "next_task.md").exists()
+    assert not (run_dir / "codrax_final_outputs").exists()
 
 
 def test_low_coverage_values_select_expected_phases(tmp_path: Path) -> None:
@@ -1059,6 +1484,7 @@ def test_direct_codrax_mode_requires_audit_log(tmp_path: Path) -> None:
 project_name: direct_mode_project
 evidence:
   codrax:
+    enabled: false
     direct_mode:
       enabled: true
       require_audit_log: true
@@ -1094,6 +1520,9 @@ test_support:
     - tests
   test_build_config_paths:
     - CMakeLists.txt
+evidence:
+  codrax:
+    enabled: false
 """,
         encoding="utf-8",
     )
@@ -1126,6 +1555,9 @@ project_name: protected_memory_project
 test_support:
   test_dirs:
     - tests
+evidence:
+  codrax:
+    enabled: false
 """,
         encoding="utf-8",
     )
@@ -1155,6 +1587,9 @@ project_name: missing_modified_files_project
 test_support:
   test_dirs:
     - tests
+evidence:
+  codrax:
+    enabled: false
 """,
         encoding="utf-8",
     )
@@ -1167,6 +1602,38 @@ test_support:
     assert result["passed"] is False
     assert "missing_modified_files_log" in {item["check"] for item in result["audit"]["violations"]}
     assert (run_dir / "preflight_fix_task.md").exists()
+
+
+def test_preflight_skips_codrax_when_local_violations_already_block(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    command = write_fake_codrax(
+        tmp_path,
+        "- preflight_blocker: tests/foo_test.cpp:3 should not be queried when local checks already block.\n",
+    )
+    (root / "project_profile.yaml").write_text(
+        f"""
+project_name: local_block_project
+test_support:
+  test_dirs:
+    - tests
+evidence:
+  codrax:
+    enabled: true
+    command: {command!r}
+""",
+        encoding="utf-8",
+    )
+    run_dir = root / ".gtestcov" / "runs" / "local-block"
+    run_dir.mkdir(parents=True)
+    (run_dir / "task.md").write_text("# generated task\n", encoding="utf-8")
+
+    result = preflight_check(root, run_id="local-block", target="src/foo.cpp")
+
+    assert result["passed"] is False
+    assert result["codrax_evidence"]["status"] == "skipped_due_local_violations"
+    assert "codrax_preflight_blocker" not in {item["check"] for item in result["audit"]["violations"]}
+    assert not (run_dir / "codrax_final_outputs").exists()
 
 
 def test_preflight_check_cli_and_codrax_blocker(tmp_path: Path) -> None:
@@ -1229,6 +1696,9 @@ project_name: described_tests_project
 test_support:
   test_dirs:
     - tests
+evidence:
+  codrax:
+    enabled: false
 """,
         encoding="utf-8",
     )
@@ -1262,6 +1732,9 @@ project_name: described_tests_project
 test_support:
   test_dirs:
     - tests
+evidence:
+  codrax:
+    enabled: false
 """,
         encoding="utf-8",
     )
@@ -1418,6 +1891,9 @@ build:
   coverage_xml: coverage.xml
 coverage:
   changed_line: 70.0
+evidence:
+  codrax:
+    enabled: false
 """,
         encoding="utf-8",
     )
@@ -1490,6 +1966,9 @@ build:
   test_command: '"{sys.executable}" -c "print(\\"No tests were found!!!\\")"'
 coverage:
   changed_line: 70.0
+evidence:
+  codrax:
+    enabled: false
 """,
         encoding="utf-8",
     )
@@ -1526,7 +2005,7 @@ def test_version_and_install_doctor_report_environment(tmp_path: Path) -> None:
     info = get_version_info(REPO_ROOT)
     doctor = install_doctor(project_root=project, tool_root=REPO_ROOT, tool_home=tmp_path / "tool_home")
 
-    assert info.version == "0.2.0"
+    assert info.version == "0.2.1"
     assert info.version_source == "pyproject.toml"
     assert info.memory_schema_version >= 1
     assert isinstance(info.git_dirty, bool)
@@ -1610,7 +2089,7 @@ def test_zip_upgrade_inspect_apply_restore_and_rollback(tmp_path: Path) -> None:
     inspected = upgrade_inspect(
         tool_root=old_tool,
         project_root=project,
-        target_ref="v0.2.0",
+        target_ref="v0.2.1",
         install_mode="zip",
         upgrade_id="up-test",
         tool_home=tool_home,
@@ -1672,7 +2151,7 @@ def test_upgrade_apply_blocks_invalid_memory_migration(tmp_path: Path) -> None:
     upgrade_inspect(
         tool_root=old_tool,
         project_root=project,
-        target_ref="v0.2.0",
+        target_ref="v0.2.1",
         install_mode="zip",
         upgrade_id="bad-memory",
         tool_home=tool_home,
@@ -1715,7 +2194,7 @@ def test_upgrade_apply_refreshes_reused_venv_when_provided(tmp_path: Path) -> No
     upgrade_inspect(
         tool_root=old_tool,
         project_root=project,
-        target_ref="v0.2.0",
+        target_ref="v0.2.1",
         install_mode="zip",
         upgrade_id="venv-refresh",
         tool_home=tool_home,
@@ -1758,7 +2237,7 @@ def test_upgrade_cli_refuses_apply_without_approval(tmp_path: Path) -> None:
             "--project-root",
             str(project),
             "--target-ref",
-            "v0.2.0",
+            "v0.2.1",
             "--install-mode",
             "zip",
             "--upgrade-id",

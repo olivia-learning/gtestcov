@@ -12,6 +12,7 @@ from .memory import refresh_memory, show_memory
 from .next_round import plan_next_round
 from .preflight import preflight_check
 from .profile_sync import profile_sync
+from .run_status import show_status
 from .task import build_task
 from .understanding import generate_project_understanding
 from .verify import audit_generated_tests, verify_iteration
@@ -54,9 +55,9 @@ def run_mcp_server() -> None:
         return data
 
     @mcp.tool()
-    def gtestcov_codrax_check(project_root: str = ".") -> dict[str, Any]:
+    def gtestcov_codrax_check(project_root: str = ".", run_id: str = "") -> dict[str, Any]:
         """Check whether the configured CODRAX CLI can return file:line evidence."""
-        return codrax_check(Path(project_root))
+        return codrax_check(Path(project_root), run_id=run_id or None)
 
     @mcp.tool()
     def gtestcov_profile_sync(
@@ -152,6 +153,11 @@ def run_mcp_server() -> None:
     def gtestcov_memory_show(project_root: str = ".", run_id: str = "latest", output_format: str = "md") -> dict[str, Any]:
         """Show run handoff memory as Markdown or JSON."""
         return show_memory(Path(project_root), run_id, output_format)
+
+    @mcp.tool()
+    def gtestcov_status(project_root: str = ".", run_id: str = "latest") -> dict[str, Any]:
+        """Show current gtestcov and CODRAX run status."""
+        return show_status(Path(project_root), run_id)
 
     @mcp.tool()
     def gtestcov_audit_generated_tests(project_root: str = ".") -> dict[str, Any]:

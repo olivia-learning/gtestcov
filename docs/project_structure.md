@@ -95,9 +95,12 @@ Weak AI may read `.gtestcov/` evidence and task files, but must not directly edi
 tool-generated state such as handoff files, project memory, verify results, or
 coverage history.
 
-Inside a run directory, `codrax_live.log` is the bounded live CODRAX diagnostic
-log. If it grows past the configured limit, older output is dropped and the
-newest tail is kept. The structured `codrax_evidence.*` files are still the
+Inside a run directory, `gtestcov_status.json` records the current gtestcov
+phase and `codrax_status.json` records the current CODRAX phase. During CODRAX
+execution, native CODRAX logs are kept under `codrax_native_logs/`. After each
+CODRAX invocation exits, `codrax_final_outputs/` stores a bounded final-output
+record for that invocation, and `codrax_final_log.md` points to the latest
+invocation content. The structured `codrax_evidence.*` files are still the
 source of project facts.
 
 ### `.opencode/commands/`

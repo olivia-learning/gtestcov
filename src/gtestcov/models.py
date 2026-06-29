@@ -86,7 +86,7 @@ class CodraxDirectModeConfig(BaseModel):
 
 
 class CodraxEvidenceConfig(BaseModel):
-    enabled: bool = False
+    enabled: bool = True
     command: str = "codrax"
     invocation: str = "auto"
     args_template: list[str] = Field(default_factory=list)
@@ -98,8 +98,9 @@ class CodraxEvidenceConfig(BaseModel):
     max_runtime_seconds: int = 7200
     probe_timeout_seconds: int = 20
     max_output_chars: int = 12000
-    live_log_max_bytes: int = 10 * 1024 * 1024
-    live_log_keep_tail_bytes: int = 1024 * 1024
+    native_log_tail_bytes: int = 65536
+    final_log_max_bytes: int = 1024 * 1024
+    status_update_interval_seconds: float = 2.0
     open_observer: bool = False
     direct_mode: CodraxDirectModeConfig = Field(default_factory=CodraxDirectModeConfig)
 
@@ -210,10 +211,13 @@ class CodraxEvidence(BaseModel):
     stdout_excerpt: str = ""
     stderr_excerpt: str = ""
     timeout_kind: str = ""
-    live_log_path: str = ""
-    live_log_truncated: bool = False
-    live_log_size_bytes: int = 0
-    dropped_log_bytes: int = 0
+    status_path: str = ""
+    native_log_dir: str = ""
+    native_log_files: list[str] = Field(default_factory=list)
+    native_log_tail_excerpt: str = ""
+    final_log_path: str = ""
+    final_log_truncated: bool = False
+    final_log_size_bytes: int = 0
     related_files: list[str] = Field(default_factory=list)
     file_line_refs: list[str] = Field(default_factory=list)
     symbols: list[str] = Field(default_factory=list)

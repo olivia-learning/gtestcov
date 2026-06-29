@@ -20,6 +20,10 @@ PROTECTED_GTESTCOV_STATE_FILES = {
     "resume_prompt.md",
     "verify.json",
     "coverage_history.json",
+    "gtestcov_status.json",
+    "gtestcov_events.ndjson",
+    "codrax_status.json",
+    "codrax_final_log.md",
     "project_memory.json",
     "project_memory.md",
 }
@@ -153,6 +157,12 @@ def protected_gtestcov_state_paths(run_id: str | None = None) -> list[str]:
         f"{run_prefix}/resume_prompt.md",
         f"{run_prefix}/verify.json",
         f"{run_prefix}/coverage_history.json",
+        f"{run_prefix}/gtestcov_status.json",
+        f"{run_prefix}/gtestcov_events.ndjson",
+        f"{run_prefix}/codrax_status.json",
+        f"{run_prefix}/codrax_final_log.md",
+        f"{run_prefix}/codrax_final_outputs/",
+        f"{run_prefix}/codrax_native_logs/",
         ".gtestcov/memory/project_memory.json",
         ".gtestcov/memory/project_memory.md",
     ]
@@ -163,6 +173,10 @@ def is_protected_gtestcov_state(path: str) -> bool:
     if normalized.startswith(".gtestcov/memory/"):
         return Path(normalized).name in PROTECTED_GTESTCOV_STATE_FILES
     if normalized.startswith(".gtestcov/runs/"):
+        if "/codrax_final_outputs/" in normalized or normalized.endswith("/codrax_final_outputs"):
+            return True
+        if "/codrax_native_logs/" in normalized or normalized.endswith("/codrax_native_logs"):
+            return True
         return Path(normalized).name in PROTECTED_GTESTCOV_STATE_FILES
     return False
 

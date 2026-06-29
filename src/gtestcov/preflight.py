@@ -12,6 +12,7 @@ from .fs import resolve_run_dir
 from .memory import refresh_memory
 from .models import CodraxEvidence
 from .profile import load_profile
+from .run_status import update_run_status
 
 
 BLOCKER_RE = re.compile(r"\b(preflight[-_ ]?blocker|blocking issue|must not compile|will not compile)\b", re.I)
@@ -29,6 +30,13 @@ def preflight_check(
     profile = load_profile(root)
     coverage_goal = read_coverage_goal(run_dir)
     target = target or coverage_goal.get("target", "")
+    update_run_status(
+        run_dir,
+        phase="preflight.start",
+        command="check",
+        target=target,
+        current_operation="local_audit",
+    )
 
     generated = audit_generated_tests(root, run_dir)
     direct_log_violations = audit_codrax_direct_log(run_dir, profile)
@@ -41,12 +49,44 @@ def preflight_check(
 
     evidence = CodraxEvidence(enabled=profile.evidence.codrax.enabled, command=profile.evidence.codrax.command, status="disabled")
     codrax_violations: list[dict[str, str]] = []
-    if include_codrax and profile.evidence.codrax.enabled:
+    if violations:
+        evidence = CodraxEvidence(
+            enabled=profile.evidence.codrax.enabled,
+            available=False,
+            command=profile.evidence.codrax.command,
+            status="skipped_due_local_violations",
+            notes=["CODRAX preflight review was skipped because local preflight violations already block build/test/coverage."],
+        )
+    elif include_codrax and profile.evidence.codrax.enabled:
         request = build_preflight_request(root, run_dir, active_run_id, target, violations)
-        evidence = execute_codrax_request(root, profile.evidence.codrax, request, enabled=True, run_dir=run_dir)
+        update_run_status(
+            run_dir,
+            phase="preflight.codrax_review",
+            command="check",
+            target=target,
+            current_operation="codrax_preflight_review",
+            extra={"local_violation_count": len(violations)},
+        )
+        evidence = execute_codrax_request(
+            root,
+            profile.evidence.codrax,
+            request,
+            enabled=True,
+            run_dir=run_dir,
+            operation_name="preflight",
+        )
         write_codrax_evidence(run_dir, evidence)
         codrax_violations = extract_codrax_preflight_blockers(evidence)
         violations.extend(codrax_violations)
+        update_run_status(
+            run_dir,
+            phase="preflight.codrax_done",
+            command="check",
+            target=target,
+            current_operation="write_preflight_report",
+            notes=[f"CODRAX status: {evidence.status}"],
+            extra={"codrax_status": evidence.status, "codrax_violation_count": len(codrax_violations)},
+        )
 
     result: dict[str, Any] = {
         "run_id": active_run_id,
@@ -75,7 +115,25 @@ def preflight_check(
         result["preflight_fix_task_path"] = ""
     else:
         result["preflight_fix_task_path"] = ""
+    update_run_status(
+        run_dir,
+        phase="preflight.memory_refresh",
+        command="check",
+        target=target,
+        current_operation="memory_refresh",
+        last_artifact=str(run_dir / "preflight_check.md"),
+        extra={"passed": result["passed"], "violation_count": len(violations)},
+    )
     refresh_memory(root, active_run_id)
+    update_run_status(
+        run_dir,
+        phase="preflight.done",
+        command="check",
+        target=target,
+        current_operation="done",
+        last_artifact=str(run_dir / "preflight_check.md"),
+        extra={"passed": result["passed"], "violation_count": len(violations)},
+    )
     return result
 
 

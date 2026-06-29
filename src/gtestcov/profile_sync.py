@@ -6,10 +6,12 @@ from pathlib import Path
 from typing import Any
 
 from .codrax import FILE_LINE_RE, execute_codrax_request, render_codrax_evidence, write_codrax_evidence
+from .evidence_paths import codrax_test_source_dirs
 from .fs import ensure_run_dir
 from .memory import refresh_memory
 from .models import CodraxEvidence, ProjectProfile
 from .profile import PROFILE_NAME, load_profile, profile_to_yaml
+from .run_status import update_run_status
 
 
 SCALAR_FIELDS = {
@@ -65,9 +67,53 @@ def profile_sync(
     run_id, run_dir = ensure_run_dir(root, run_id)
     profile = load_profile(root)
     cfg = profile.evidence.codrax
-    evidence = execute_codrax_request(root, cfg, build_profile_sync_request(target, build_file), enabled=cfg.enabled, run_dir=run_dir)
+    update_run_status(
+        run_dir,
+        phase="profile_sync.start",
+        command="profile-sync",
+        target=target,
+        current_operation="codrax_profile_sync",
+        extra={"line_coverage": line_coverage, "build_file": build_file or ""},
+    )
+    evidence = execute_codrax_request(
+        root,
+        cfg,
+        build_profile_sync_request(target, build_file),
+        enabled=cfg.enabled,
+        run_dir=run_dir,
+        operation_name="profile_sync",
+    )
+    update_run_status(
+        run_dir,
+        phase="profile_sync.codrax_done",
+        command="profile-sync",
+        target=target,
+        current_operation="parse_profile_updates",
+        notes=[f"CODRAX status: {evidence.status}"],
+        extra={"codrax_status": evidence.status},
+    )
 
-    if evidence.status != "ok":
+    updates: dict[str, dict[str, Any]] = {}
+    report_evidence = evidence
+    if evidence.status == "ok":
+        updates = parse_profile_updates(evidence)
+        add_user_build_file_candidate_from_evidence(updates, evidence, build_file or "")
+        add_test_support_dirs_from_evidence(updates, evidence)
+    anchor_evidence: CodraxEvidence | None = None
+    if build_file and not build_file_candidates_from_updates(updates):
+        anchor_evidence = execute_codrax_request(
+            root,
+            cfg,
+            build_file_anchor_request(target, build_file),
+            enabled=cfg.enabled,
+            run_dir=run_dir,
+            operation_name="profile_sync_build_file_anchor",
+        )
+        add_user_build_file_candidate_from_evidence(updates, anchor_evidence, build_file)
+        if evidence.status != "ok" and build_file_candidates_from_updates(updates):
+            report_evidence = anchor_evidence
+
+    if evidence.status != "ok" and not build_file_candidates_from_updates(updates):
         write_codrax_evidence(run_dir, evidence)
         manual_path = run_dir / "manual_review_needed.md"
         manual_path.write_text(
@@ -86,10 +132,26 @@ def profile_sync(
             "codrax_evidence": evidence.model_dump(mode="json"),
             "notes": ["CODRAX evidence was not usable; profile was not updated."],
         }
+        update_run_status(
+            run_dir,
+            phase="profile_sync.manual_review_needed",
+            command="profile-sync",
+            target=target,
+            current_operation="memory_refresh",
+            last_artifact=str(manual_path),
+            notes=[f"CODRAX evidence was not usable: {evidence.status}"],
+        )
         refresh_memory(root, run_id)
+        update_run_status(
+            run_dir,
+            phase="profile_sync.stopped",
+            command="profile-sync",
+            target=target,
+            current_operation="done",
+            last_artifact=str(manual_path),
+        )
         return result
 
-    updates = parse_profile_updates(evidence)
     if line_coverage is not None:
         updates["coverage.changed_line"] = {
             "value": float(line_coverage),
@@ -124,8 +186,8 @@ def profile_sync(
             "Please confirm the intended build/test configuration before generating tests.\n",
             encoding="utf-8",
         )
-        write_codrax_evidence(run_dir, evidence)
-        profile_evidence_path = write_profile_evidence(run_dir, target, evidence, updates, comparison)
+        write_codrax_evidence(run_dir, report_evidence)
+        profile_evidence_path = write_profile_evidence(run_dir, target, report_evidence, updates, comparison)
         result = {
             "run_id": run_id,
             "status": status,
@@ -135,18 +197,44 @@ def profile_sync(
             "profile_evidence_path": str(profile_evidence_path),
             "updates": updates,
             "build_file_comparison": comparison,
-            "codrax_evidence": evidence.model_dump(mode="json"),
+            "codrax_evidence": report_evidence.model_dump(mode="json"),
             "notes": [f"User build file anchor comparison status was {comparison['status']}; profile was not updated."],
         }
+        update_run_status(
+            run_dir,
+            phase="profile_sync.build_file_conflict",
+            command="profile-sync",
+            target=target,
+            current_operation="memory_refresh",
+            last_artifact=str(manual_path),
+            notes=[reason],
+            extra={"build_file_comparison": comparison},
+        )
         refresh_memory(root, run_id)
+        update_run_status(
+            run_dir,
+            phase="profile_sync.stopped",
+            command="profile-sync",
+            target=target,
+            current_operation="done",
+            last_artifact=str(profile_evidence_path),
+        )
         return result
 
+    update_run_status(
+        run_dir,
+        phase="profile_sync.update_profile",
+        command="profile-sync",
+        target=target,
+        current_operation="write_project_profile",
+        extra={"update_count": len(updates), "build_file_comparison": comparison},
+    )
     backup_path = backup_profile(root, run_id, profile)
     updated_profile = apply_profile_updates(profile, updates)
     profile_path = root / PROFILE_NAME
     profile_path.write_text(profile_to_yaml(updated_profile), encoding="utf-8")
-    write_codrax_evidence(run_dir, evidence)
-    profile_evidence_path = write_profile_evidence(run_dir, target, evidence, updates, comparison)
+    write_codrax_evidence(run_dir, report_evidence)
+    profile_evidence_path = write_profile_evidence(run_dir, target, report_evidence, updates, comparison)
 
     result = {
         "run_id": run_id,
@@ -157,9 +245,25 @@ def profile_sync(
         "profile_evidence_path": str(profile_evidence_path),
         "updates": updates,
         "build_file_comparison": comparison,
-        "codrax_evidence": evidence.model_dump(mode="json"),
+        "codrax_evidence": report_evidence.model_dump(mode="json"),
     }
+    update_run_status(
+        run_dir,
+        phase="profile_sync.memory_refresh",
+        command="profile-sync",
+        target=target,
+        current_operation="memory_refresh",
+        last_artifact=str(profile_evidence_path),
+    )
     refresh_memory(root, run_id)
+    update_run_status(
+        run_dir,
+        phase="profile_sync.done",
+        command="profile-sync",
+        target=target,
+        current_operation="done",
+        last_artifact=str(profile_evidence_path),
+    )
     return result
 
 
@@ -191,6 +295,25 @@ Rules:
 """
 
 
+def build_file_anchor_request(target: str, build_file: str) -> str:
+    return f"""Read-only build-file anchor verification for gtestcov.
+
+Target file: {target}
+User-provided build file anchor: {build_file}
+
+Only verify whether the user-provided build file is a real repository build or test configuration file for this target.
+Do not infer or invent commands.
+Do not use project_profile.yaml, .gtestcov, or .codrax as evidence.
+
+If the build file is supported by repository evidence, return exactly this machine-readable line:
+build.candidate_build_files: {build_file}  # {build_file}:<line>
+
+The cited line must come from the user-provided build file and should show module registration, target source registration, test registration, or another build/test configuration statement.
+If you cannot cite that build file as file:line, return exactly:
+not found
+"""
+
+
 def parse_profile_updates(evidence: CodraxEvidence) -> dict[str, dict[str, Any]]:
     updates: dict[str, dict[str, Any]] = {}
     allowed = SCALAR_FIELDS | LIST_FIELDS | FLOAT_FIELDS | BOOL_FIELDS
@@ -213,6 +336,47 @@ def parse_profile_updates(evidence: CodraxEvidence) -> dict[str, dict[str, Any]]
             continue
         updates[key] = {"value": parsed, "evidence": refs, "source": "codrax"}
     return updates
+
+
+def add_user_build_file_candidate_from_evidence(
+    updates: dict[str, dict[str, Any]],
+    evidence: CodraxEvidence,
+    build_file: str,
+) -> None:
+    user_build_file = _normalize_path(build_file)
+    if not user_build_file:
+        return
+    matching_refs = [
+        ref for ref in evidence.file_line_refs
+        if _paths_match(ref.rsplit(":", 1)[0], user_build_file)
+    ]
+    if not matching_refs:
+        return
+    existing = updates.get("build.candidate_build_files", {}).get("value")
+    candidates = existing if isinstance(existing, list) else []
+    merged = _dedupe_paths([*candidates, user_build_file])
+    updates["build.candidate_build_files"] = {
+        "value": merged,
+        "evidence": matching_refs,
+        "source": "codrax_final_output_fallback",
+    }
+
+
+def add_test_support_dirs_from_evidence(updates: dict[str, dict[str, Any]], evidence: CodraxEvidence) -> None:
+    refs_by_dir = codrax_test_source_dirs(evidence)
+    if not refs_by_dir:
+        return
+    existing = updates.get("test_support.test_dirs", {}).get("value")
+    current_dirs = existing if isinstance(existing, list) else []
+    merged = _dedupe_paths([*current_dirs, *refs_by_dir.keys()])
+    evidence_refs: list[str] = []
+    for test_dir in merged:
+        evidence_refs.extend(refs_by_dir.get(test_dir, []))
+    updates["test_support.test_dirs"] = {
+        "value": merged,
+        "evidence": _dedupe_paths(evidence_refs),
+        "source": "codrax_existing_tests_fallback",
+    }
 
 
 def parse_field_value(key: str, value: str) -> Any:
@@ -280,7 +444,10 @@ def backup_profile(project_root: Path, run_id: str, profile: ProjectProfile) -> 
     backup_path = backup_dir / f"project_profile.{run_id}.yaml"
     profile_path = project_root / PROFILE_NAME
     if profile_path.exists():
-        shutil.copy2(profile_path, backup_path)
+        try:
+            shutil.copy2(profile_path, backup_path)
+        except OSError:
+            shutil.copyfile(profile_path, backup_path)
     else:
         backup_path.write_text(profile_to_yaml(profile), encoding="utf-8")
     return backup_path

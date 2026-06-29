@@ -8,6 +8,7 @@ from .codrax import FILE_LINE_RE, execute_codrax_request, write_codrax_evidence
 from .fs import ensure_run_dir
 from .models import CodraxEvidence, ProjectProfile, ProjectUnderstanding, UnderstandingFinding
 from .profile import load_profile
+from .run_status import update_run_status
 
 
 @dataclass(frozen=True)
@@ -78,9 +79,17 @@ def ask_codrax_for_code_fact(
     profile: ProjectProfile,
     question: str,
     run_dir: Path | None = None,
+    operation_name: str = "project_understanding",
 ) -> CodraxEvidence:
     cfg = profile.evidence.codrax
-    return execute_codrax_request(project_root.resolve(), cfg, question, enabled=cfg.enabled, run_dir=run_dir)
+    return execute_codrax_request(
+        project_root.resolve(),
+        cfg,
+        question,
+        enabled=cfg.enabled,
+        run_dir=run_dir,
+        operation_name=operation_name,
+    )
 
 
 def generate_project_understanding(
@@ -91,11 +100,42 @@ def generate_project_understanding(
     root = project_root.resolve()
     profile = load_profile(root)
     run_id, run_dir = ensure_run_dir(root, run_id)
-    understanding = collect_project_understanding(root, target, profile, run_dir=run_dir)
-    path = write_project_understanding(run_dir, understanding)
-    if understanding.codrax_evidence.enabled:
-        write_codrax_evidence(run_dir, understanding.codrax_evidence)
-    return understanding, path
+    update_run_status(
+        run_dir,
+        phase="evidence.start",
+        step="evidence",
+        command="gtestcov evidence",
+        target=target,
+        current_operation="codrax_project_understanding",
+    )
+    try:
+        understanding = collect_project_understanding(root, target, profile, run_dir=run_dir)
+        path = write_project_understanding(run_dir, understanding)
+        if understanding.codrax_evidence.enabled:
+            write_codrax_evidence(run_dir, understanding.codrax_evidence)
+        update_run_status(
+            run_dir,
+            phase="evidence.done",
+            step="evidence",
+            command="gtestcov evidence",
+            target=target,
+            current_operation="done",
+            last_artifact=str(path),
+            notes=[f"status={understanding.status}"],
+            extra={"codrax_status": understanding.codrax_evidence.status},
+        )
+        return understanding, path
+    except Exception as exc:
+        update_run_status(
+            run_dir,
+            phase="evidence.failed",
+            step="evidence",
+            command="gtestcov evidence",
+            target=target,
+            current_operation="failed",
+            notes=[str(exc)],
+        )
+        raise
 
 
 def build_understanding_request(target: str, questions: tuple[CodebaseQuestion, ...]) -> str:

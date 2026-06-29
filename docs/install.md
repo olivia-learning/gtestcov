@@ -133,6 +133,10 @@ CODRAX is installed separately by the user. After `gtestcov init`, run
 `gtestcov codrax-check --project-root <cpp-project-root>`. If CODRAX is missing
 or its CLI shape changed, report that result and do not guess.
 
+New `project_profile.yaml` files enable CODRAX by default. Do not silently turn
+it off for a real project; if CODRAX is unavailable, stop with the check result
+or write manual review material instead of letting the weak AI guess.
+
 After installation, write:
 
 ```text

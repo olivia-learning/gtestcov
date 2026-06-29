@@ -277,8 +277,9 @@ def _profile_summary(profile: ProjectProfile) -> dict[str, Any]:
         "codrax_runtime": {
             "idle_timeout_seconds": profile.evidence.codrax.idle_timeout_seconds,
             "max_runtime_seconds": profile.evidence.codrax.max_runtime_seconds,
-            "live_log_max_bytes": profile.evidence.codrax.live_log_max_bytes,
-            "live_log_keep_tail_bytes": profile.evidence.codrax.live_log_keep_tail_bytes,
+            "native_log_tail_bytes": profile.evidence.codrax.native_log_tail_bytes,
+            "final_log_max_bytes": profile.evidence.codrax.final_log_max_bytes,
+            "status_update_interval_seconds": profile.evidence.codrax.status_update_interval_seconds,
         },
     }
 
@@ -434,7 +435,11 @@ def _collect_artifacts(root: Path, run_dir: Path) -> dict[str, str]:
         "coverage_goal.json",
         "profile_evidence.md",
         "codrax_evidence.md",
-        "codrax_live.log",
+        "codrax_status.json",
+        "codrax_final_log.md",
+        "codrax_final_outputs/index.json",
+        "gtestcov_status.json",
+        "gtestcov_events.ndjson",
         "project_understanding.md",
         "decision_report.md",
         "test_obligations.md",

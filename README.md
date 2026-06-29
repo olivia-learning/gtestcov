@@ -129,9 +129,14 @@ evidence:
     require_file_line: true
     idle_timeout_seconds: 300
     max_runtime_seconds: 7200
-    live_log_max_bytes: 10485760
-    live_log_keep_tail_bytes: 1048576
+    native_log_tail_bytes: 65536
+    final_log_max_bytes: 1048576
+    status_update_interval_seconds: 2.0
 ```
+
+New profiles enable CODRAX by default. Keep it enabled for real projects so
+project-specific build, test, coverage, and dependency facts come from cited
+evidence instead of weak-AI guesses.
 
 Then check the integration and collect evidence without generating tests:
 
@@ -139,6 +144,7 @@ Then check the integration and collect evidence without generating tests:
 gtestcov codrax-check --project-root .
 gtestcov profile-sync --project-root . --target <target-file> --line-coverage 80 --build-file <build-entry-file>
 gtestcov cover --project-root . --target <target-file> --line-coverage 80 --build-file <build-entry-file> --run-id coverage-run
+gtestcov status --project-root . --run-id coverage-run
 gtestcov evidence --project-root . --target <target-file> --run-id evidence-smoke
 gtestcov obligations --project-root . --target <target-file> --run-id obligations-smoke
 gtestcov analyze --project-root . --target <target-file> --run-id analyze-smoke
@@ -151,13 +157,17 @@ diagnostics, and writes manual review material instead of asking the weak AI to
 guess project details. Project-specific adapters do not activate without
 CODRAX-cited evidence.
 
-CODRAX execution is streamed into `.gtestcov/runs/<run_id>/codrax_live.log`.
-The idle timeout stops only when CODRAX produces no output for the configured
-activity window, while the max runtime is a hard ceiling for a long analysis.
-The live log is bounded: after it reaches `live_log_max_bytes`, `gtestcov` keeps
-the newest `live_log_keep_tail_bytes` and records that older output was dropped.
-Curated CODRAX evidence remains the source of project facts; the live log is
-diagnostic material.
+Long CODRAX and gtestcov runs can be inspected with `gtestcov status`. During
+CODRAX execution, `gtestcov` asks CODRAX to write native logs under
+`.gtestcov/runs/<run_id>/codrax_native_logs/` and uses stdout/stderr or native
+log growth as activity. The idle timeout stops only when there is no such
+activity for the configured window, while the max runtime is a hard ceiling.
+After every CODRAX invocation exits, `gtestcov` immediately writes that
+invocation's bounded final stdout/stderr/native-log summary under
+`.gtestcov/runs/<run_id>/codrax_final_outputs/` and updates
+`.gtestcov/runs/<run_id>/codrax_final_log.md` as the latest-invocation shortcut.
+Curated CODRAX evidence remains the source of project facts; native/final logs
+are diagnostic material.
 
 `profile-sync` uses the CODRAX evidence backend to find project-specific build,
 test, coverage, and test-support paths. It

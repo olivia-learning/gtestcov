@@ -40,3 +40,11 @@ coverage:
   changed_line: 70.0
   protocol_line: 80.0
   max_iterations: 3
+evidence:
+  codrax:
+    enabled: true
+    command: codrax
+    invocation: auto
+    model_policy: self_hosted_ok
+    max_context: targeted
+    require_file_line: true

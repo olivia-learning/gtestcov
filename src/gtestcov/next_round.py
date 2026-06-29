@@ -10,6 +10,7 @@ from .fs import resolve_run_dir
 from .memory import refresh_memory
 from .models import CodraxEvidence
 from .profile import load_profile
+from .run_status import update_run_status
 
 
 HISTORY_NAME = "coverage_history.json"
@@ -40,6 +41,14 @@ def plan_next_round(
     max_rounds = max_stagnant_rounds if max_stagnant_rounds is not None else profile.coverage.max_stagnant_rounds
     min_delta = min_improvement if min_improvement is not None else profile.coverage.min_iteration_improvement
     coverage_phase = classify_coverage_phase(profile, verify.get("coverage", {}), current_value, met_target)
+    update_run_status(
+        run_dir,
+        phase="next_round.start",
+        command="next-round",
+        target=target,
+        current_operation="coverage_phase_analysis",
+        extra={"coverage_phase": coverage_phase, "current_coverage": current_value, "met_target": met_target},
+    )
 
     existing_history = _read_json(run_dir / HISTORY_NAME)
     if record_iteration or not existing_history.get("entries"):
@@ -56,6 +65,61 @@ def plan_next_round(
     else:
         history = existing_history
 
+    if (
+        coverage_phase == "coverage_mapping_blocked"
+        and not verify.get("coverage", {}).get("path")
+        and not _has_configured_verify_command(verify)
+    ):
+        evidence = CodraxEvidence(
+            enabled=profile.evidence.codrax.enabled,
+            available=False,
+            command=profile.evidence.codrax.command,
+            status="skipped_verification_not_configured",
+            notes=["Next-round CODRAX analysis was skipped because build/test/coverage commands are not configured."],
+        )
+        analysis_path = write_next_round_analysis(run_dir, active_run_id, target, verify, history, evidence)
+        manual_path = run_dir / "manual_review_needed.md"
+        manual_path.write_text(
+            "# Manual Review Needed\n\n"
+            "Build/test/coverage commands are not configured, so gtestcov cannot measure target-file coverage "
+            "or plan a meaningful next coverage iteration yet.\n\n"
+            "Configure project_profile.yaml build/test/coverage commands or run profile-sync with stronger CODRAX evidence, "
+            "then rerun verify.\n",
+            encoding="utf-8",
+        )
+        _remove_if_exists(run_dir / "next_task.md")
+        _remove_if_exists(run_dir / "stagnation_report.md")
+        result = {
+            "run_id": active_run_id,
+            "status": "verification_not_configured",
+            "history": history,
+            "next_round_analysis_path": str(analysis_path),
+            "next_task_path": "",
+            "stagnation_report_path": "",
+            "manual_review_needed_path": str(manual_path),
+            "codrax_evidence": evidence.model_dump(mode="json"),
+        }
+        update_run_status(
+            run_dir,
+            phase="next_round.verification_not_configured",
+            command="next-round",
+            target=target,
+            current_operation="memory_refresh",
+            last_artifact=str(manual_path),
+            extra={"coverage_phase": coverage_phase, "codrax_status": evidence.status},
+        )
+        refresh_memory(root, active_run_id)
+        update_run_status(
+            run_dir,
+            phase="next_round.done",
+            command="next-round",
+            target=target,
+            current_operation="done",
+            last_artifact=str(manual_path),
+            extra={"status": "verification_not_configured"},
+        )
+        return result
+
     if met_target:
         _remove_if_exists(run_dir / "next_round_analysis.md")
         _remove_if_exists(run_dir / "next_task.md")
@@ -67,7 +131,23 @@ def plan_next_round(
             "next_task_path": "",
             "stagnation_report_path": "",
         }
+        update_run_status(
+            run_dir,
+            phase="next_round.met_target",
+            command="next-round",
+            target=target,
+            current_operation="memory_refresh",
+            extra={"coverage_phase": coverage_phase},
+        )
         refresh_memory(root, active_run_id)
+        update_run_status(
+            run_dir,
+            phase="next_round.done",
+            command="next-round",
+            target=target,
+            current_operation="done",
+            extra={"status": "met_target"},
+        )
         return result
 
     if history["stagnated"]:
@@ -84,7 +164,25 @@ def plan_next_round(
             "stagnation_report_path": str(report_path),
             "codrax_evidence": evidence.model_dump(mode="json"),
         }
+        update_run_status(
+            run_dir,
+            phase="next_round.stagnated",
+            command="next-round",
+            target=target,
+            current_operation="memory_refresh",
+            last_artifact=str(report_path),
+            extra={"coverage_phase": coverage_phase, "codrax_status": evidence.status},
+        )
         refresh_memory(root, active_run_id)
+        update_run_status(
+            run_dir,
+            phase="next_round.done",
+            command="next-round",
+            target=target,
+            current_operation="done",
+            last_artifact=str(report_path),
+            extra={"status": "stagnated"},
+        )
         return result
 
     evidence = _collect_next_round_evidence(root, run_dir, active_run_id, target, verify, history)
@@ -100,7 +198,25 @@ def plan_next_round(
         "stagnation_report_path": "",
         "codrax_evidence": evidence.model_dump(mode="json"),
     }
+    update_run_status(
+        run_dir,
+        phase="next_round.next_task_ready",
+        command="next-round",
+        target=target,
+        current_operation="memory_refresh",
+        last_artifact=str(task_path),
+        extra={"coverage_phase": coverage_phase, "codrax_status": evidence.status},
+    )
     refresh_memory(root, active_run_id)
+    update_run_status(
+        run_dir,
+        phase="next_round.done",
+        command="next-round",
+        target=target,
+        current_operation="done",
+        last_artifact=str(task_path),
+        extra={"status": "next_task_ready"},
+    )
     return result
 
 
@@ -385,7 +501,30 @@ def _collect_next_round_evidence(
 ) -> CodraxEvidence:
     profile = load_profile(project_root)
     request = build_next_round_request(run_id, target, verify, history)
-    evidence = execute_codrax_request(project_root, profile.evidence.codrax, request, enabled=profile.evidence.codrax.enabled, run_dir=run_dir)
+    update_run_status(
+        run_dir,
+        phase="next_round.codrax_analysis",
+        command="next-round",
+        target=target,
+        current_operation="codrax_next_round_analysis",
+    )
+    evidence = execute_codrax_request(
+        project_root,
+        profile.evidence.codrax,
+        request,
+        enabled=profile.evidence.codrax.enabled,
+        run_dir=run_dir,
+        operation_name="next_round",
+    )
+    update_run_status(
+        run_dir,
+        phase="next_round.codrax_done",
+        command="next-round",
+        target=target,
+        current_operation="write_next_round_artifacts",
+        notes=[f"CODRAX status: {evidence.status}"],
+        extra={"codrax_status": evidence.status},
+    )
     write_codrax_evidence(run_dir, evidence)
     return evidence
 
@@ -405,6 +544,10 @@ def _trim_verify(verify: dict[str, Any]) -> dict[str, Any]:
             for label, command in verify.get("commands", {}).items()
         },
     }
+
+
+def _has_configured_verify_command(verify: dict[str, Any]) -> bool:
+    return any(bool(command.get("configured")) for command in verify.get("commands", {}).values())
 
 
 def _read_json(path: Path) -> dict[str, Any]:

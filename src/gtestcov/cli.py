@@ -16,6 +16,7 @@ from .opencode import write_opencode_files
 from .preflight import preflight_check
 from .profile_sync import profile_sync
 from .profile import write_default_profile
+from .run_status import show_status
 from .task import build_task
 from .understanding import generate_project_understanding
 from .upgrade import (
@@ -72,6 +73,7 @@ def main(argv: list[str] | None = None) -> None:
 
     codrax = sub.add_parser("codrax-check", help="Check the configured CODRAX CLI integration.")
     codrax.add_argument("--project-root", default=".")
+    codrax.add_argument("--run-id", default="")
 
     task = sub.add_parser("task", help="Build an OpenCode task package.")
     task.add_argument("--project-root", default=".")
@@ -94,6 +96,7 @@ def main(argv: list[str] | None = None) -> None:
     check.add_argument("--project-root", default=".")
     check.add_argument("--run-id", default="latest")
     check.add_argument("--target", default="")
+    check.add_argument("--no-codrax", action="store_true", help="Run only local preflight checks and skip CODRAX review.")
 
     diagnose = sub.add_parser("diagnose-failure", help="Use CODRAX to diagnose a failed verify iteration.")
     diagnose.add_argument("--project-root", default=".")
@@ -114,6 +117,10 @@ def main(argv: list[str] | None = None) -> None:
     memory_show.add_argument("--project-root", default=".")
     memory_show.add_argument("--run-id", default="latest")
     memory_show.add_argument("--format", choices=["md", "json"], default="md")
+
+    status = sub.add_parser("status", help="Show current gtestcov and CODRAX run status.")
+    status.add_argument("--project-root", default=".")
+    status.add_argument("--run-id", default="latest")
 
     version = sub.add_parser("version", help="Show gtestcov version and installation details.")
     version.add_argument("--tool-root", default="")
@@ -211,7 +218,7 @@ def main(argv: list[str] | None = None) -> None:
             )
         )
     elif args.command == "codrax-check":
-        print(json.dumps(codrax_check(Path(args.project_root)), indent=2))
+        print(json.dumps(codrax_check(Path(args.project_root), run_id=args.run_id or None), indent=2))
     elif args.command == "task":
         report, task_path = build_task(Path(args.project_root), args.target, args.run_id or None, args.line_coverage)
         data = report.model_dump(mode="json")
@@ -235,7 +242,7 @@ def main(argv: list[str] | None = None) -> None:
             )
         )
     elif args.command == "check":
-        print(json.dumps(preflight_check(Path(args.project_root), args.run_id, args.target), indent=2))
+        print(json.dumps(preflight_check(Path(args.project_root), args.run_id, args.target, include_codrax=not args.no_codrax), indent=2))
     elif args.command == "diagnose-failure":
         print(json.dumps(diagnose_failure(Path(args.project_root), args.run_id, args.target), indent=2))
     elif args.command == "next-round":
@@ -258,6 +265,8 @@ def main(argv: list[str] | None = None) -> None:
             print(json.dumps(result["content"], indent=2))
         else:
             print(result["content"])
+    elif args.command == "status":
+        print(json.dumps(show_status(Path(args.project_root), args.run_id), indent=2))
     elif args.command == "version":
         tool_root = Path(args.tool_root).resolve() if args.tool_root else package_root()
         print(json.dumps(get_version_info(tool_root, args.install_mode).as_dict(), indent=2))

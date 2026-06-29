@@ -15,7 +15,7 @@ from typing import Any
 from .memory import SCHEMA_VERSION as MEMORY_SCHEMA_VERSION
 
 
-FALLBACK_VERSION = "0.2.0"
+FALLBACK_VERSION = "0.2.1"
 INSTALL_MANIFEST = "gtestcov_install_manifest.json"
 
 

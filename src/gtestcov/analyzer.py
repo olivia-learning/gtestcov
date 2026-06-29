@@ -12,6 +12,7 @@ from .fs import CPP_SUFFIXES, ensure_run_dir, iter_files, read_text
 from .models import AnalysisReport, TargetFeatures, TestObligation, relpath
 from .obligations import build_test_obligations, render_test_obligations, write_test_obligations
 from .profile import ProjectProfile, load_profile
+from .run_status import update_run_status
 from .understanding import collect_project_understanding, render_project_understanding, write_project_understanding
 
 
@@ -37,52 +38,102 @@ def analyze_target(project_root: Path, target: str, run_id: str | None = None) -
     root = project_root.resolve()
     profile = load_profile(root)
     run_id, run_dir = ensure_run_dir(root, run_id)
-
-    discovery = discover_project(root)
-    dependency = parse_dependency_xml(root, profile)
-    features = inspect_target(root, target)
-    project_understanding = collect_project_understanding(root, target, profile)
-    codrax_evidence = project_understanding.codrax_evidence
-    features = _merge_codrax_features(features, codrax_evidence)
-    symbols = classify_default_symbols(root, profile, features.dependency_symbols)
-    selected, reason, support, risks = classify_test_type(features, profile)
-    reason, support, risks = _merge_codrax_guidance(codrax_evidence, reason, support, risks)
-    adapter_guidance = apply_project_adapters(project_understanding, selected)
-    if adapter_guidance.adapter_name:
-        selected = adapter_guidance.selected_test_type or selected
-        reason, support, risks = _merge_adapter_guidance(adapter_guidance, reason, support, risks)
-    planned_files = _planned_files(root, target, selected, profile)
-    if adapter_guidance.planned_files:
-        planned_files = _dedupe([*adapter_guidance.planned_files, *planned_files])
-    test_obligations = build_test_obligations(root, target, selected, features, codrax_evidence, profile)
-    test_obligations = _dedupe_obligations([*test_obligations, *adapter_guidance.obligations])
-
-    report = AnalysisReport(
-        run_id=run_id,
+    update_run_status(
+        run_dir,
+        phase="analyze.start",
+        command="analyze",
         target=target,
-        project_style=discovery,
-        dependency_resolution=dependency,
-        observed_features=features,
-        observed_symbols=symbols,
-        selected_test_type=selected,
-        reason=reason,
-        required_support=support,
-        safety_risks=risks,
-        planned_files=planned_files,
-        codrax_evidence=codrax_evidence,
-        project_understanding=project_understanding,
-        test_obligations=test_obligations,
+        current_operation="static_scan",
     )
-    decision_path = run_dir / "decision_report.md"
-    report.decision_report_path = relpath(decision_path, root)
-    decision_text = render_decision_report(report, profile)
-    decision_path.write_text(decision_text, encoding="utf-8")
-    (run_dir / "analysis.json").write_text(report.model_dump_json(indent=2), encoding="utf-8")
-    if codrax_evidence.enabled:
-        write_codrax_evidence(run_dir, codrax_evidence)
-        write_project_understanding(run_dir, project_understanding)
-    write_test_obligations(run_dir, test_obligations)
-    return report
+
+    try:
+        discovery = discover_project(root)
+        dependency = parse_dependency_xml(root, profile)
+        features = inspect_target(root, target)
+        update_run_status(
+            run_dir,
+            phase="analyze.codrax_understanding",
+            command="analyze",
+            target=target,
+            current_operation="codrax_project_understanding",
+        )
+        project_understanding = collect_project_understanding(root, target, profile, run_dir=run_dir)
+        codrax_evidence = project_understanding.codrax_evidence
+        update_run_status(
+            run_dir,
+            phase="analyze.codrax_done",
+            command="analyze",
+            target=target,
+            current_operation="classify_test_type",
+            notes=[f"CODRAX status: {codrax_evidence.status}"],
+            extra={"codrax_status": codrax_evidence.status},
+        )
+        features = _merge_codrax_features(features, codrax_evidence)
+        symbols = classify_default_symbols(root, profile, features.dependency_symbols)
+        selected, reason, support, risks = classify_test_type(features, profile)
+        reason, support, risks = _merge_codrax_guidance(codrax_evidence, reason, support, risks)
+        adapter_guidance = apply_project_adapters(project_understanding, selected)
+        if adapter_guidance.adapter_name:
+            selected = adapter_guidance.selected_test_type or selected
+            reason, support, risks = _merge_adapter_guidance(adapter_guidance, reason, support, risks)
+        planned_files = _planned_files(root, target, selected, profile)
+        if adapter_guidance.planned_files:
+            planned_files = _dedupe([*adapter_guidance.planned_files, *planned_files])
+        test_obligations = build_test_obligations(root, target, selected, features, codrax_evidence, profile)
+        test_obligations = _dedupe_obligations([*test_obligations, *adapter_guidance.obligations])
+
+        report = AnalysisReport(
+            run_id=run_id,
+            target=target,
+            project_style=discovery,
+            dependency_resolution=dependency,
+            observed_features=features,
+            observed_symbols=symbols,
+            selected_test_type=selected,
+            reason=reason,
+            required_support=support,
+            safety_risks=risks,
+            planned_files=planned_files,
+            codrax_evidence=codrax_evidence,
+            project_understanding=project_understanding,
+            test_obligations=test_obligations,
+        )
+        decision_path = run_dir / "decision_report.md"
+        report.decision_report_path = relpath(decision_path, root)
+        update_run_status(
+            run_dir,
+            phase="analyze.write_reports",
+            command="analyze",
+            target=target,
+            current_operation="write_decision_report",
+            last_artifact=str(decision_path),
+        )
+        decision_text = render_decision_report(report, profile)
+        decision_path.write_text(decision_text, encoding="utf-8")
+        (run_dir / "analysis.json").write_text(report.model_dump_json(indent=2), encoding="utf-8")
+        if codrax_evidence.enabled:
+            write_codrax_evidence(run_dir, codrax_evidence)
+            write_project_understanding(run_dir, project_understanding)
+        write_test_obligations(run_dir, test_obligations)
+        update_run_status(
+            run_dir,
+            phase="analyze.done",
+            command="analyze",
+            target=target,
+            current_operation="done",
+            last_artifact=str(decision_path),
+        )
+        return report
+    except Exception as exc:
+        update_run_status(
+            run_dir,
+            phase="analyze.failed",
+            command="analyze",
+            target=target,
+            current_operation="failed",
+            notes=[f"{type(exc).__name__}: {exc}"],
+        )
+        raise
 
 
 def inspect_target(project_root: Path, target: str) -> TargetFeatures:

@@ -15,6 +15,7 @@ from .models import relpath
 from .next_round import plan_next_round
 from .preflight import preflight_check
 from .profile import load_profile
+from .run_status import update_run_status
 
 
 def verify_iteration(
@@ -39,11 +40,28 @@ def verify_iteration(
         else float(coverage_goal.get("line_coverage", profile.coverage.changed_line if not target else profile.targets.default_line_coverage))
     )
     results: dict[str, Any] = {"run_id": run_id, "commands": {}, "coverage": {}, "audit": {}}
-    preflight = preflight_check(root, run_id, target)
+    update_run_status(
+        run_dir,
+        phase="verify.start",
+        command="verify",
+        target=target,
+        current_operation="preflight",
+        extra={"threshold_percent": threshold},
+    )
+    preflight = preflight_check(root, run_id, target, include_codrax=False)
     results["preflight"] = preflight
     results["audit"] = preflight["audit"]
 
     if not preflight["passed"]:
+        update_run_status(
+            run_dir,
+            phase="verify.blocked_by_preflight",
+            command="verify",
+            target=target,
+            current_operation="write_verify_json",
+            last_artifact=str(run_dir / "preflight_fix_task.md"),
+            extra={"violation_count": len(preflight["audit"]["violations"])},
+        )
         results["blocked_by_preflight"] = True
         results["commands"] = {
             label: _skipped_command(command, "blocked_by_preflight")
@@ -61,11 +79,47 @@ def verify_iteration(
         verify_path.write_text(json.dumps(results, indent=2), encoding="utf-8")
         (run_dir / "review_checklist.md").write_text(render_review_checklist(results), encoding="utf-8")
         refresh_memory(root, run_id)
+        update_run_status(
+            run_dir,
+            phase="verify.done",
+            command="verify",
+            target=target,
+            current_operation="done",
+            last_artifact=str(verify_path),
+            extra={"passed": False, "blocked_by_preflight": True},
+        )
         return results
 
     for label, command, timeout_seconds in _command_plan(profile, build_timeout, test_timeout, coverage_timeout):
+        update_run_status(
+            run_dir,
+            phase=f"verify.{label}.running",
+            command="verify",
+            target=target,
+            current_operation=f"run_{label}_command",
+            extra={"configured": bool(command), "timeout_seconds": timeout_seconds},
+        )
         results["commands"][label] = _run_command(command, root, label, timeout_seconds)
+        update_run_status(
+            run_dir,
+            phase=f"verify.{label}.done",
+            command="verify",
+            target=target,
+            current_operation="coverage_parse" if label == "coverage" else "run_next_command",
+            extra={
+                "configured": results["commands"][label]["configured"],
+                "returncode": results["commands"][label]["returncode"],
+                "timeout": results["commands"][label].get("timeout", False),
+            },
+        )
 
+    update_run_status(
+        run_dir,
+        phase="verify.coverage_parse",
+        command="verify",
+        target=target,
+        current_operation="find_coverage_report",
+    )
     coverage_path = _find_coverage_report(root, run_dir, profile.build.coverage_xml)
     if coverage_path:
         coverage = parse_coverage_report(coverage_path, target=target)
@@ -88,6 +142,14 @@ def verify_iteration(
     verify_path = run_dir / "verify.json"
     verify_path.write_text(json.dumps(results, indent=2), encoding="utf-8")
     if target:
+        update_run_status(
+            run_dir,
+            phase="verify.next_round",
+            command="verify",
+            target=target,
+            current_operation="plan_next_round",
+            extra={"coverage_meets_threshold": coverage["meets_threshold"]},
+        )
         results["next_round"] = plan_next_round(
             root,
             run_id,
@@ -98,6 +160,15 @@ def verify_iteration(
         verify_path.write_text(json.dumps(results, indent=2), encoding="utf-8")
     (run_dir / "review_checklist.md").write_text(render_review_checklist(results), encoding="utf-8")
     refresh_memory(root, run_id)
+    update_run_status(
+        run_dir,
+        phase="verify.done",
+        command="verify",
+        target=target,
+        current_operation="done",
+        last_artifact=str(verify_path),
+        extra={"passed": results["passed"], "coverage": coverage},
+    )
     return results
 
 

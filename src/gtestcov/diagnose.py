@@ -8,6 +8,7 @@ from .codrax import execute_codrax_request, render_codrax_evidence, write_codrax
 from .fs import resolve_run_dir
 from .memory import refresh_memory
 from .profile import load_profile
+from .run_status import update_run_status
 
 
 def diagnose_failure(project_root: Path, run_id: str = "latest", target: str = "") -> dict[str, Any]:
@@ -17,7 +18,30 @@ def diagnose_failure(project_root: Path, run_id: str = "latest", target: str = "
     verify_path = run_dir / "verify.json"
     verify = json.loads(verify_path.read_text(encoding="utf-8")) if verify_path.exists() else {}
     request = build_failure_diagnosis_request(active_run_id, target, verify)
-    evidence = execute_codrax_request(root, profile.evidence.codrax, request, enabled=profile.evidence.codrax.enabled, run_dir=run_dir)
+    update_run_status(
+        run_dir,
+        phase="diagnose_failure.start",
+        command="diagnose-failure",
+        target=target,
+        current_operation="codrax_failure_diagnosis",
+    )
+    evidence = execute_codrax_request(
+        root,
+        profile.evidence.codrax,
+        request,
+        enabled=profile.evidence.codrax.enabled,
+        run_dir=run_dir,
+        operation_name="diagnose_failure",
+    )
+    update_run_status(
+        run_dir,
+        phase="diagnose_failure.codrax_done",
+        command="diagnose-failure",
+        target=target,
+        current_operation="write_diagnosis_report",
+        notes=[f"CODRAX status: {evidence.status}"],
+        extra={"codrax_status": evidence.status},
+    )
     write_codrax_evidence(run_dir, evidence)
     report_path = run_dir / "failure_diagnosis.md"
     report_path.write_text(render_failure_diagnosis(active_run_id, target, evidence), encoding="utf-8")
@@ -30,7 +54,23 @@ def diagnose_failure(project_root: Path, run_id: str = "latest", target: str = "
         "codrax_evidence": evidence.model_dump(mode="json"),
     }
     json_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    update_run_status(
+        run_dir,
+        phase="diagnose_failure.memory_refresh",
+        command="diagnose-failure",
+        target=target,
+        current_operation="memory_refresh",
+        last_artifact=str(report_path),
+    )
     refresh_memory(root, active_run_id)
+    update_run_status(
+        run_dir,
+        phase="diagnose_failure.done",
+        command="diagnose-failure",
+        target=target,
+        current_operation="done",
+        last_artifact=str(report_path),
+    )
     return {**data, "diagnosis_json": str(json_path)}
 
 
