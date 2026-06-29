@@ -4,7 +4,8 @@ import json
 import re
 from pathlib import Path
 
-from .fs import CPP_SUFFIXES, iter_files, read_text
+from .file_index import index_status, load_file_index
+from .fs import CPP_SUFFIXES, read_text, scan_files, scan_roots_from_profile
 from .models import DiscoveryReport, relpath
 from .profile import load_profile
 
@@ -30,7 +31,18 @@ def discover_project(project_root: Path) -> DiscoveryReport:
     support_dirs: dict[str, list[str]] = {kind: [] for kind in ["fake", "harness", "guard", "builder", "dependency_shim"]}
 
     inferred_build_system = "unknown"
-    for path in iter_files(root):
+    scan_roots = scan_roots_from_profile(profile)
+    exclude_dirs = profile.paths.exclude_dirs
+    max_files = profile.paths.max_files
+    index_state = index_status(root)
+    if index_state.get("hit"):
+        all_scan = _scan_from_index(root, load_file_index(root))
+        cpp_scan = _filter_index_scan(all_scan, CPP_SUFFIXES)
+    else:
+        all_scan = scan_files(root, scan_roots=scan_roots, exclude_dirs=exclude_dirs, max_files=max_files)
+        cpp_scan = scan_files(root, CPP_SUFFIXES, scan_roots=scan_roots, exclude_dirs=exclude_dirs, max_files=max_files)
+    _write_scan_progress(root, "discover", all_scan, cpp_scan, index_state)
+    for path in all_scan["files"]:
         rel = relpath(path, root)
         name = path.name
         if name in BUILD_NAMES:
@@ -40,7 +52,7 @@ def discover_project(project_root: Path) -> DiscoveryReport:
         if rel in _configured_manifests(profile):
             manifests.append(rel)
 
-    for path in iter_files(root, CPP_SUFFIXES):
+    for path in cpp_scan["files"]:
         rel = relpath(path, root)
         text = read_text(path)
         if "gtest/gtest.h" in text:
@@ -78,6 +90,78 @@ def discover_project(project_root: Path) -> DiscoveryReport:
         inferred_build_system=inferred_build_system,
         conflicts=conflicts,
     )
+
+
+def _write_scan_progress(root: Path, command: str, all_scan: dict, cpp_scan: dict, index_state: dict) -> None:
+    gtestcov_dir = root / ".gtestcov"
+    gtestcov_dir.mkdir(parents=True, exist_ok=True)
+    data = {
+        "command": command,
+        "file_index": index_state,
+        "all_files": _scan_summary(all_scan),
+        "cpp_files": _scan_summary(cpp_scan),
+    }
+    progress_path = gtestcov_dir / "discovery_scan_progress.json"
+    progress_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    if all_scan.get("truncated") or cpp_scan.get("truncated"):
+        truncated_path = gtestcov_dir / "scan_truncated.md"
+        truncated_path.write_text(
+            "\n".join(
+                [
+                    "# gtestcov Scan Truncated",
+                    "",
+                    f"- Command: `{command}`",
+                    f"- Max files: `{all_scan.get('max_files') or cpp_scan.get('max_files')}`",
+                    f"- All matched files: `{all_scan.get('matched')}`",
+                    f"- C/C++ matched files: `{cpp_scan.get('matched')}`",
+                    "",
+                    "The configured scan limit was reached before the scan completed.",
+                    "Narrow `paths.source_roots`, `paths.test_roots`, or `paths.build_roots`, or increase `paths.max_files`.",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+
+def _scan_summary(scan: dict) -> dict:
+    return {
+        "scanned": scan.get("scanned", 0),
+        "matched": scan.get("matched", 0),
+        "truncated": scan.get("truncated", False),
+        "max_files": scan.get("max_files"),
+        "scan_roots": scan.get("scan_roots", []),
+        "exclude_dirs": scan.get("exclude_dirs", []),
+        "skipped_excluded": scan.get("skipped_excluded", 0),
+        "progress": scan.get("progress", []),
+    }
+
+
+def _scan_from_index(root: Path, index: dict) -> dict:
+    files = []
+    for rel in sorted((index.get("files") or {}).keys()):
+        path = root / rel
+        if path.exists() and path.is_file():
+            files.append(path)
+    return {
+        "files": files,
+        "scanned": len(files),
+        "matched": len(files),
+        "truncated": index.get("truncated", False),
+        "max_files": index.get("max_files"),
+        "scan_roots": index.get("scan_roots", []),
+        "exclude_dirs": index.get("exclude_dirs", []),
+        "skipped_excluded": 0,
+        "progress": [],
+    }
+
+
+def _filter_index_scan(scan: dict, suffixes: set[str]) -> dict:
+    files = [path for path in scan.get("files", []) if path.suffix.lower() in suffixes]
+    filtered = dict(scan)
+    filtered["files"] = files
+    filtered["matched"] = len(files)
+    return filtered
 
 
 def save_discovery(project_root: Path, run_dir: Path) -> DiscoveryReport:

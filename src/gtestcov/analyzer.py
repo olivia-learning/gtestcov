@@ -8,7 +8,8 @@ from .adapters import apply_project_adapters
 from .codrax import render_codrax_evidence, write_codrax_evidence
 from .dependency import classify_default_symbols, parse_dependency_xml
 from .discovery import discover_project
-from .fs import CPP_SUFFIXES, ensure_run_dir, iter_files, read_text
+from .evidence_pack import evidence_cache_status
+from .fs import CPP_SUFFIXES, ensure_run_dir, iter_files, read_text, resolve_project_path, scan_roots_from_profile
 from .models import AnalysisReport, TargetFeatures, TestObligation, relpath
 from .obligations import build_test_obligations, render_test_obligations, write_test_obligations
 from .profile import ProjectProfile, load_profile
@@ -49,7 +50,7 @@ def analyze_target(project_root: Path, target: str, run_id: str | None = None) -
     try:
         discovery = discover_project(root)
         dependency = parse_dependency_xml(root, profile)
-        features = inspect_target(root, target)
+        features = inspect_target(root, target, profile)
         update_run_status(
             run_dir,
             phase="analyze.codrax_understanding",
@@ -66,7 +67,7 @@ def analyze_target(project_root: Path, target: str, run_id: str | None = None) -
             target=target,
             current_operation="classify_test_type",
             notes=[f"CODRAX status: {codrax_evidence.status}"],
-            extra={"codrax_status": codrax_evidence.status},
+            extra={"codrax_status": codrax_evidence.status, "evidence_cache": evidence_cache_status(codrax_evidence)},
         )
         features = _merge_codrax_features(features, codrax_evidence)
         symbols = classify_default_symbols(root, profile, features.dependency_symbols)
@@ -122,6 +123,7 @@ def analyze_target(project_root: Path, target: str, run_id: str | None = None) -
             target=target,
             current_operation="done",
             last_artifact=str(decision_path),
+            extra={"evidence_cache": evidence_cache_status(codrax_evidence)},
         )
         return report
     except Exception as exc:
@@ -136,9 +138,10 @@ def analyze_target(project_root: Path, target: str, run_id: str | None = None) -
         raise
 
 
-def inspect_target(project_root: Path, target: str) -> TargetFeatures:
-    path = _resolve_target_path(project_root, target)
-    text = read_text(path) if path else _collect_symbol_context(project_root, target)
+def inspect_target(project_root: Path, target: str, profile: ProjectProfile | None = None) -> TargetFeatures:
+    active_profile = profile or load_profile(project_root)
+    path = _resolve_target_path(project_root, target, active_profile)
+    text = read_text(path) if path else _collect_symbol_context(project_root, target, active_profile)
     signal_text = _strip_comments(text)
     target_label = relpath(path, project_root) if path else target
     dependency_symbols = sorted(set(DEPENDENCY_SYMBOL_RE.findall(signal_text)))
@@ -156,19 +159,31 @@ def inspect_target(project_root: Path, target: str) -> TargetFeatures:
     )
 
 
-def _resolve_target_path(project_root: Path, target: str) -> Path | None:
-    candidate = (project_root / target).resolve()
+def _resolve_target_path(project_root: Path, target: str, profile: ProjectProfile) -> Path | None:
+    candidate = resolve_project_path(project_root, target)
     if candidate.exists() and candidate.is_file():
         return candidate
-    for path in iter_files(project_root, CPP_SUFFIXES):
+    for path in iter_files(
+        project_root,
+        CPP_SUFFIXES,
+        scan_roots=scan_roots_from_profile(profile),
+        exclude_dirs=profile.paths.exclude_dirs,
+        max_files=profile.paths.max_files,
+    ):
         if path.name == target or relpath(path, project_root) == target:
             return path
     return None
 
 
-def _collect_symbol_context(project_root: Path, symbol: str) -> str:
+def _collect_symbol_context(project_root: Path, symbol: str, profile: ProjectProfile) -> str:
     chunks: list[str] = []
-    for path in iter_files(project_root, CPP_SUFFIXES):
+    for path in iter_files(
+        project_root,
+        CPP_SUFFIXES,
+        scan_roots=scan_roots_from_profile(profile),
+        exclude_dirs=profile.paths.exclude_dirs,
+        max_files=profile.paths.max_files,
+    ):
         text = read_text(path)
         if symbol not in text:
             continue

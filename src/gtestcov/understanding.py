@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .codrax import FILE_LINE_RE, execute_codrax_request, write_codrax_evidence
+from .evidence_pack import attach_cache, evidence_cache_status, load_codrax_payload, store_codrax_payload
 from .fs import ensure_run_dir
 from .models import CodraxEvidence, ProjectProfile, ProjectUnderstanding, UnderstandingFinding
 from .profile import load_profile
@@ -66,8 +67,27 @@ def collect_project_understanding(
             notes=["CODRAX project understanding is disabled; project-specific assumptions are not available."],
         )
 
-    evidence = ask_codrax_for_code_fact(project_root, profile, build_understanding_request(target, questions), run_dir=run_dir)
+    request = build_understanding_request(target, questions)
+    evidence, cache = load_codrax_payload(
+        project_root,
+        target,
+        "project_understanding",
+        request_key=request,
+    )
+    if evidence is None:
+        evidence = ask_codrax_for_code_fact(project_root, profile, request, run_dir=run_dir)
+        cache = store_codrax_payload(
+            project_root,
+            target,
+            "project_understanding",
+            evidence,
+            request_key=request,
+            previous_cache=cache,
+        )
+        evidence = attach_cache(evidence, cache)
     understanding = parse_understanding(evidence, target, [question.question_id for question in questions])
+    if evidence.cache.get("hit"):
+        understanding.notes.append("Loaded CODRAX project understanding from evidence_pack cache.")
     if evidence.status == "ok" and not understanding.findings:
         understanding.status = "insufficient"
         understanding.notes.append("CODRAX returned file:line evidence but no structured understanding lines could be extracted.")
@@ -122,7 +142,10 @@ def generate_project_understanding(
             current_operation="done",
             last_artifact=str(path),
             notes=[f"status={understanding.status}"],
-            extra={"codrax_status": understanding.codrax_evidence.status},
+            extra={
+                "codrax_status": understanding.codrax_evidence.status,
+                "evidence_cache": evidence_cache_status(understanding.codrax_evidence),
+            },
         )
         return understanding, path
     except Exception as exc:

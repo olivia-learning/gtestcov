@@ -113,6 +113,26 @@ class TargetsConfig(BaseModel):
     default_line_coverage: float = 70.0
 
 
+class PathsConfig(BaseModel):
+    source_roots: list[str] = Field(default_factory=lambda: ["src"])
+    test_roots: list[str] = Field(default_factory=lambda: ["tests"])
+    build_roots: list[str] = Field(default_factory=lambda: ["."])
+    exclude_dirs: list[str] = Field(
+        default_factory=lambda: [
+            ".git",
+            ".gtestcov",
+            ".repo",
+            "out",
+            "build",
+            "third_party",
+            "prebuilts",
+            "vendor",
+        ]
+    )
+    max_files: int = 8000
+    max_file_bytes: int = 1048576
+
+
 class EmbeddedPolicy(BaseModel):
     hardware_access: str = "require_hal_fake_or_hil"
     rtos_access: str = "fake_osal_for_host_gtest"
@@ -133,6 +153,7 @@ class ProjectProfile(BaseModel):
     embedded_policy: EmbeddedPolicy = Field(default_factory=EmbeddedPolicy)
     coverage: CoverageThresholds = Field(default_factory=CoverageThresholds)
     targets: TargetsConfig = Field(default_factory=TargetsConfig)
+    paths: PathsConfig = Field(default_factory=PathsConfig)
     evidence: EvidenceConfig = Field(default_factory=EvidenceConfig)
     common_test_types: list[str] = Field(
         default_factory=lambda: [
@@ -225,6 +246,7 @@ class CodraxEvidence(BaseModel):
     harnesses: list[str] = Field(default_factory=list)
     risks: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
+    cache: dict[str, Any] = Field(default_factory=dict)
 
 
 class UnderstandingFinding(BaseModel):

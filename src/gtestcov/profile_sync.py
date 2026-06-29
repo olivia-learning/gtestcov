@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .codrax import FILE_LINE_RE, execute_codrax_request, render_codrax_evidence, write_codrax_evidence
+from .evidence_pack import attach_cache, evidence_cache_status, load_codrax_payload, store_codrax_payload
 from .evidence_paths import codrax_test_source_dirs
 from .fs import ensure_run_dir
 from .memory import refresh_memory
@@ -75,14 +76,31 @@ def profile_sync(
         current_operation="codrax_profile_sync",
         extra={"line_coverage": line_coverage, "build_file": build_file or ""},
     )
-    evidence = execute_codrax_request(
+    profile_sync_request = build_profile_sync_request(target, build_file)
+    evidence, cache = load_codrax_payload(
         root,
-        cfg,
-        build_profile_sync_request(target, build_file),
-        enabled=cfg.enabled,
-        run_dir=run_dir,
-        operation_name="profile_sync",
+        target,
+        "profile_sync",
+        request_key=profile_sync_request,
     )
+    if evidence is None:
+        evidence = execute_codrax_request(
+            root,
+            cfg,
+            profile_sync_request,
+            enabled=cfg.enabled,
+            run_dir=run_dir,
+            operation_name="profile_sync",
+        )
+        cache = store_codrax_payload(
+            root,
+            target,
+            "profile_sync",
+            evidence,
+            request_key=profile_sync_request,
+            previous_cache=cache,
+        )
+        evidence = attach_cache(evidence, cache)
     update_run_status(
         run_dir,
         phase="profile_sync.codrax_done",
@@ -90,7 +108,7 @@ def profile_sync(
         target=target,
         current_operation="parse_profile_updates",
         notes=[f"CODRAX status: {evidence.status}"],
-        extra={"codrax_status": evidence.status},
+        extra={"codrax_status": evidence.status, "evidence_cache": evidence_cache_status(evidence)},
     )
 
     updates: dict[str, dict[str, Any]] = {}
@@ -101,14 +119,31 @@ def profile_sync(
         add_test_support_dirs_from_evidence(updates, evidence)
     anchor_evidence: CodraxEvidence | None = None
     if build_file and not build_file_candidates_from_updates(updates):
-        anchor_evidence = execute_codrax_request(
+        anchor_request = build_file_anchor_request(target, build_file)
+        anchor_evidence, anchor_cache = load_codrax_payload(
             root,
-            cfg,
-            build_file_anchor_request(target, build_file),
-            enabled=cfg.enabled,
-            run_dir=run_dir,
-            operation_name="profile_sync_build_file_anchor",
+            target,
+            "profile_sync_build_file_anchor",
+            request_key=anchor_request,
         )
+        if anchor_evidence is None:
+            anchor_evidence = execute_codrax_request(
+                root,
+                cfg,
+                anchor_request,
+                enabled=cfg.enabled,
+                run_dir=run_dir,
+                operation_name="profile_sync_build_file_anchor",
+            )
+            anchor_cache = store_codrax_payload(
+                root,
+                target,
+                "profile_sync_build_file_anchor",
+                anchor_evidence,
+                request_key=anchor_request,
+                previous_cache=anchor_cache,
+            )
+            anchor_evidence = attach_cache(anchor_evidence, anchor_cache)
         add_user_build_file_candidate_from_evidence(updates, anchor_evidence, build_file)
         if evidence.status != "ok" and build_file_candidates_from_updates(updates):
             report_evidence = anchor_evidence
@@ -130,6 +165,7 @@ def profile_sync(
             "backup_path": "",
             "profile_evidence_path": "",
             "codrax_evidence": evidence.model_dump(mode="json"),
+            "evidence_cache": evidence_cache_status(evidence),
             "notes": ["CODRAX evidence was not usable; profile was not updated."],
         }
         update_run_status(
@@ -140,6 +176,7 @@ def profile_sync(
             current_operation="memory_refresh",
             last_artifact=str(manual_path),
             notes=[f"CODRAX evidence was not usable: {evidence.status}"],
+            extra={"evidence_cache": evidence_cache_status(evidence)},
         )
         refresh_memory(root, run_id)
         update_run_status(
@@ -198,6 +235,7 @@ def profile_sync(
             "updates": updates,
             "build_file_comparison": comparison,
             "codrax_evidence": report_evidence.model_dump(mode="json"),
+            "evidence_cache": evidence_cache_status(report_evidence),
             "notes": [f"User build file anchor comparison status was {comparison['status']}; profile was not updated."],
         }
         update_run_status(
@@ -208,7 +246,7 @@ def profile_sync(
             current_operation="memory_refresh",
             last_artifact=str(manual_path),
             notes=[reason],
-            extra={"build_file_comparison": comparison},
+            extra={"build_file_comparison": comparison, "evidence_cache": evidence_cache_status(report_evidence)},
         )
         refresh_memory(root, run_id)
         update_run_status(
@@ -229,23 +267,38 @@ def profile_sync(
         current_operation="write_project_profile",
         extra={"update_count": len(updates), "build_file_comparison": comparison},
     )
-    backup_path = backup_profile(root, run_id, profile)
     updated_profile = apply_profile_updates(profile, updates)
     profile_path = root / PROFILE_NAME
-    profile_path.write_text(profile_to_yaml(updated_profile), encoding="utf-8")
+    updated_profile_text = profile_to_yaml(updated_profile)
+    current_profile_text = profile_path.read_text(encoding="utf-8") if profile_path.exists() else ""
+    profile_changed = current_profile_text != updated_profile_text
+    backup_path = backup_profile(root, run_id, profile) if profile_changed else None
+    if profile_changed:
+        profile_path.write_text(updated_profile_text, encoding="utf-8")
+    if profile_changed:
+        refreshed_cache = store_codrax_payload(
+            root,
+            target,
+            "profile_sync",
+            report_evidence,
+            request_key=profile_sync_request,
+            previous_cache=report_evidence.cache,
+        )
+        report_evidence = attach_cache(report_evidence, refreshed_cache)
     write_codrax_evidence(run_dir, report_evidence)
     profile_evidence_path = write_profile_evidence(run_dir, target, report_evidence, updates, comparison)
 
     result = {
         "run_id": run_id,
         "status": "ok",
-        "updated": True,
+        "updated": profile_changed,
         "profile_path": str(profile_path),
-        "backup_path": str(backup_path),
+        "backup_path": str(backup_path) if backup_path else "",
         "profile_evidence_path": str(profile_evidence_path),
         "updates": updates,
         "build_file_comparison": comparison,
         "codrax_evidence": report_evidence.model_dump(mode="json"),
+        "evidence_cache": evidence_cache_status(report_evidence),
     }
     update_run_status(
         run_dir,
@@ -254,6 +307,7 @@ def profile_sync(
         target=target,
         current_operation="memory_refresh",
         last_artifact=str(profile_evidence_path),
+        extra={"evidence_cache": evidence_cache_status(report_evidence)},
     )
     refresh_memory(root, run_id)
     update_run_status(
@@ -263,6 +317,7 @@ def profile_sync(
         target=target,
         current_operation="done",
         last_artifact=str(profile_evidence_path),
+        extra={"evidence_cache": evidence_cache_status(report_evidence)},
     )
     return result
 

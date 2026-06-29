@@ -5,10 +5,12 @@ import json
 from pathlib import Path
 
 from .analyzer import analyze_target
-from .codrax import codrax_check
+from .codrax import codrax_check, codrax_doctor
 from .cover import cover_target
+from .detached_evidence import evidence_collect, evidence_start, evidence_status
 from .diagnose import diagnose_failure
 from .discovery import discover_project
+from .file_index import index_build, index_refresh, index_status
 from .memory import refresh_memory, show_memory
 from .mcp_server import run_mcp_server
 from .next_round import plan_next_round
@@ -17,6 +19,8 @@ from .preflight import preflight_check
 from .profile_sync import profile_sync
 from .profile import write_default_profile
 from .run_status import show_status
+from .search_backend import search_doctor, search_index, search_query
+from .semantic_backend import semantic_doctor, semantic_overview, semantic_references
 from .task import build_task
 from .understanding import generate_project_understanding
 from .upgrade import (
@@ -54,8 +58,21 @@ def main(argv: list[str] | None = None) -> None:
 
     evidence = sub.add_parser("evidence", help="Collect CODRAX-assisted evidence for a target without generating tests.")
     evidence.add_argument("--project-root", default=".")
-    evidence.add_argument("--target", required=True)
+    evidence.add_argument("--target", default="")
     evidence.add_argument("--run-id", default="")
+    evidence_sub = evidence.add_subparsers(dest="evidence_command")
+    evidence_start_cmd = evidence_sub.add_parser("start", help="Start detached CODRAX evidence collection.")
+    evidence_start_cmd.add_argument("--project-root", default=".")
+    evidence_start_cmd.add_argument("--target", required=True)
+    evidence_start_cmd.add_argument("--run-id", default="")
+    evidence_status_cmd = evidence_sub.add_parser("status", help="Poll detached CODRAX evidence status.")
+    evidence_status_cmd.add_argument("--project-root", default=".")
+    evidence_status_cmd.add_argument("--run-id", required=True)
+    evidence_collect_cmd = evidence_sub.add_parser("collect", help="Collect detached CODRAX evidence result after completion.")
+    evidence_collect_cmd.add_argument("--project-root", default=".")
+    evidence_collect_cmd.add_argument("--run-id", required=True)
+    evidence_collect_cmd.add_argument("--target", default="")
+    evidence_collect_cmd.add_argument("--background-worker", action="store_true", help=argparse.SUPPRESS)
 
     profile_sync_cmd = sub.add_parser("profile-sync", help="Use CODRAX evidence to update project_profile.yaml.")
     profile_sync_cmd.add_argument("--project-root", default=".")
@@ -71,9 +88,20 @@ def main(argv: list[str] | None = None) -> None:
     cover.add_argument("--build-file", default="")
     cover.add_argument("--run-id", default="")
 
-    codrax = sub.add_parser("codrax-check", help="Check the configured CODRAX CLI integration.")
-    codrax.add_argument("--project-root", default=".")
-    codrax.add_argument("--run-id", default="")
+    codrax_cmd = sub.add_parser("codrax", help="CODRAX integration checks.")
+    codrax_sub = codrax_cmd.add_subparsers(dest="codrax_command", required=True)
+    codrax_doctor_cmd = codrax_sub.add_parser("doctor", help="Check CODRAX CLI availability and protocol without reading the repository.")
+    codrax_doctor_cmd.add_argument("--project-root", default=".")
+    codrax_doctor_cmd.add_argument("--run-id", default="")
+
+    codrax_check_cmd = sub.add_parser("codrax-check", help="Check the configured CODRAX CLI integration.")
+    codrax_check_cmd.add_argument("--project-root", default=".")
+    codrax_check_cmd.add_argument("--run-id", default="")
+    codrax_check_mode = codrax_check_cmd.add_mutually_exclusive_group()
+    codrax_check_mode.add_argument("--quick", action="store_true", help="Check only explicit target/build-file inputs.")
+    codrax_check_mode.add_argument("--deep", action="store_true", help="Run the repository citation probe.")
+    codrax_check_cmd.add_argument("--target", default="")
+    codrax_check_cmd.add_argument("--build-file", default="")
 
     task = sub.add_parser("task", help="Build an OpenCode task package.")
     task.add_argument("--project-root", default=".")
@@ -121,6 +149,43 @@ def main(argv: list[str] | None = None) -> None:
     status = sub.add_parser("status", help="Show current gtestcov and CODRAX run status.")
     status.add_argument("--project-root", default=".")
     status.add_argument("--run-id", default="latest")
+
+    index = sub.add_parser("index", help="Build, refresh, or inspect the gtestcov file index.")
+    index_sub = index.add_subparsers(dest="index_command", required=True)
+    index_build_cmd = index_sub.add_parser("build", help="Build .gtestcov/cache/file_index.json.")
+    index_build_cmd.add_argument("--project-root", default=".")
+    index_refresh_cmd = index_sub.add_parser("refresh", help="Refresh .gtestcov/cache/file_index.json incrementally.")
+    index_refresh_cmd.add_argument("--project-root", default=".")
+    index_status_cmd = index_sub.add_parser("status", help="Show file index readiness and hit/miss reason.")
+    index_status_cmd.add_argument("--project-root", default=".")
+
+    search = sub.add_parser("search", help="Optional search backend commands.")
+    search_sub = search.add_subparsers(dest="search_command", required=True)
+    search_doctor_cmd = search_sub.add_parser("doctor", help="Diagnose optional Zoekt search backend and fallback.")
+    search_doctor_cmd.add_argument("--project-root", default=".")
+    search_index_cmd = search_sub.add_parser("index", help="Build search indexes, falling back to local file_index.")
+    search_index_cmd.add_argument("--project-root", default=".")
+    search_query_cmd = search_sub.add_parser("query", help="Query search backend and return EvidenceHit results.")
+    search_query_cmd.add_argument("--project-root", default=".")
+    search_query_cmd.add_argument("--query", required=True)
+    search_query_cmd.add_argument("--limit", type=int, default=80)
+    search_query_cmd.add_argument("--regex", action="store_true")
+
+    semantic = sub.add_parser("semantic", help="Optional C/C++ semantic backend commands.")
+    semantic_sub = semantic.add_subparsers(dest="semantic_command", required=True)
+    semantic_doctor_cmd = semantic_sub.add_parser("doctor", help="Diagnose optional Serena/clangd/ccls backends.")
+    semantic_doctor_cmd.add_argument("--project-root", default=".")
+    semantic_doctor_cmd.add_argument("--backend", choices=["auto", "serena", "clangd", "ccls"], default="auto")
+    semantic_references_cmd = semantic_sub.add_parser("references", help="Find candidate references for a symbol.")
+    semantic_references_cmd.add_argument("--project-root", default=".")
+    semantic_references_cmd.add_argument("--symbol", required=True)
+    semantic_references_cmd.add_argument("--limit", type=int, default=80)
+    semantic_references_cmd.add_argument("--backend", choices=["auto", "serena", "clangd", "ccls"], default="auto")
+    semantic_overview_cmd = semantic_sub.add_parser("overview", help="Summarize candidate symbols in a target file.")
+    semantic_overview_cmd.add_argument("--project-root", default=".")
+    semantic_overview_cmd.add_argument("--target", required=True)
+    semantic_overview_cmd.add_argument("--limit", type=int, default=80)
+    semantic_overview_cmd.add_argument("--backend", choices=["auto", "serena", "clangd", "ccls"], default="auto")
 
     version = sub.add_parser("version", help="Show gtestcov version and installation details.")
     version.add_argument("--tool-root", default="")
@@ -199,10 +264,29 @@ def main(argv: list[str] | None = None) -> None:
             )
         )
     elif args.command == "evidence":
-        understanding, evidence_path = generate_project_understanding(Path(args.project_root), args.target, args.run_id or None)
-        data = understanding.model_dump(mode="json")
-        data["evidence_path"] = str(evidence_path)
-        print(json.dumps(data, indent=2))
+        if args.evidence_command == "start":
+            print(json.dumps(evidence_start(Path(args.project_root), args.target, args.run_id or None), indent=2))
+        elif args.evidence_command == "status":
+            print(json.dumps(evidence_status(Path(args.project_root), args.run_id), indent=2))
+        elif args.evidence_command == "collect":
+            print(
+                json.dumps(
+                    evidence_collect(
+                        Path(args.project_root),
+                        args.run_id,
+                        target=args.target,
+                        background_worker=args.background_worker,
+                    ),
+                    indent=2,
+                )
+            )
+        else:
+            if not args.target:
+                parser.error("gtestcov evidence requires --target or a start/status/collect subcommand")
+            understanding, evidence_path = generate_project_understanding(Path(args.project_root), args.target, args.run_id or None)
+            data = understanding.model_dump(mode="json")
+            data["evidence_path"] = str(evidence_path)
+            print(json.dumps(data, indent=2))
     elif args.command == "profile-sync":
         print(
             json.dumps(
@@ -217,8 +301,23 @@ def main(argv: list[str] | None = None) -> None:
                 indent=2,
             )
         )
+    elif args.command == "codrax":
+        if args.codrax_command == "doctor":
+            print(json.dumps(codrax_doctor(Path(args.project_root), run_id=args.run_id or None), indent=2))
     elif args.command == "codrax-check":
-        print(json.dumps(codrax_check(Path(args.project_root), run_id=args.run_id or None), indent=2))
+        mode = "quick" if args.quick else "deep" if args.deep else "doctor"
+        print(
+            json.dumps(
+                codrax_check(
+                    Path(args.project_root),
+                    run_id=args.run_id or None,
+                    mode=mode,
+                    target=args.target,
+                    build_file=args.build_file,
+                ),
+                indent=2,
+            )
+        )
     elif args.command == "task":
         report, task_path = build_task(Path(args.project_root), args.target, args.run_id or None, args.line_coverage)
         data = report.model_dump(mode="json")
@@ -267,6 +366,37 @@ def main(argv: list[str] | None = None) -> None:
             print(result["content"])
     elif args.command == "status":
         print(json.dumps(show_status(Path(args.project_root), args.run_id), indent=2))
+    elif args.command == "index":
+        if args.index_command == "build":
+            print(json.dumps(index_build(Path(args.project_root)), indent=2))
+        elif args.index_command == "refresh":
+            print(json.dumps(index_refresh(Path(args.project_root)), indent=2))
+        elif args.index_command == "status":
+            print(json.dumps(index_status(Path(args.project_root)), indent=2))
+    elif args.command == "search":
+        if args.search_command == "doctor":
+            print(json.dumps(search_doctor(Path(args.project_root)), indent=2))
+        elif args.search_command == "index":
+            print(json.dumps(search_index(Path(args.project_root)), indent=2))
+        elif args.search_command == "query":
+            print(json.dumps(search_query(Path(args.project_root), args.query, limit=args.limit, regex=args.regex), indent=2))
+    elif args.command == "semantic":
+        if args.semantic_command == "doctor":
+            print(json.dumps(semantic_doctor(Path(args.project_root), backend=args.backend), indent=2))
+        elif args.semantic_command == "references":
+            print(
+                json.dumps(
+                    semantic_references(Path(args.project_root), args.symbol, limit=args.limit, backend=args.backend),
+                    indent=2,
+                )
+            )
+        elif args.semantic_command == "overview":
+            print(
+                json.dumps(
+                    semantic_overview(Path(args.project_root), args.target, limit=args.limit, backend=args.backend),
+                    indent=2,
+                )
+            )
     elif args.command == "version":
         tool_root = Path(args.tool_root).resolve() if args.tool_root else package_root()
         print(json.dumps(get_version_info(tool_root, args.install_mode).as_dict(), indent=2))

@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from .evidence_pack import evidence_cache_status
 from .fs import ensure_run_dir
 from .profile_sync import profile_sync
 from .run_status import update_run_status
@@ -63,6 +64,10 @@ def cover_target(
             target=target,
             current_operation="done",
             last_artifact=str(task_path),
+            extra={
+                "profile_sync_cache": sync.get("evidence_cache", {}),
+                "analysis_cache": evidence_cache_status(analysis.codrax_evidence),
+            },
         )
         return {
             "run_id": analysis.run_id,

@@ -266,13 +266,14 @@ def restore_custom(upgrade_id: str, tool_home: Path | None = None) -> dict[str, 
             if not source.is_file():
                 continue
             relative = source.relative_to(custom_files)
+            relative_label = relative.as_posix()
             target = new_slot / relative
             if target.exists() and _sha256(target) != _sha256(source):
-                conflicts.append(f"{relative}: new-version file differs; not overwritten")
+                conflicts.append(f"{relative_label}: new-version file differs; not overwritten")
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)
-            actions.append(f"restored custom file: {relative}")
+            actions.append(f"restored custom file: {relative_label}")
 
     status = "restored" if actions and not conflicts else "conflicts" if conflicts else "nothing_to_restore"
     result = {

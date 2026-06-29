@@ -5,6 +5,7 @@ from typing import Any
 
 import yaml
 
+from .fs import validate_profile_paths
 from .models import ProjectProfile
 
 
@@ -14,9 +15,13 @@ PROFILE_NAME = "project_profile.yaml"
 def load_profile(project_root: Path) -> ProjectProfile:
     path = project_root / PROFILE_NAME
     if not path.exists():
-        return ProjectProfile()
+        profile = ProjectProfile()
+        validate_profile_paths(project_root, profile.paths)
+        return profile
     data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    return ProjectProfile.model_validate(data)
+    profile = ProjectProfile.model_validate(data)
+    validate_profile_paths(project_root, profile.paths)
+    return profile
 
 
 def profile_to_yaml(profile: ProjectProfile) -> str:

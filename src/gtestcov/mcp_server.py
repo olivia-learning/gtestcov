@@ -6,6 +6,7 @@ from typing import Any
 from .analyzer import analyze_target
 from .codrax import codrax_check
 from .cover import cover_target
+from .detached_evidence import evidence_collect, evidence_start, evidence_status
 from .diagnose import diagnose_failure
 from .discovery import discover_project
 from .memory import refresh_memory, show_memory
@@ -48,11 +49,18 @@ def run_mcp_server() -> None:
 
     @mcp.tool()
     def gtestcov_collect_evidence(project_root: str = ".", target: str = "", run_id: str = "") -> dict[str, Any]:
-        """Collect CODRAX-assisted project understanding for a target without generating tests."""
-        understanding, evidence_path = generate_project_understanding(Path(project_root), target, run_id or None)
-        data = understanding.model_dump(mode="json")
-        data["evidence_path"] = str(evidence_path)
-        return data
+        """Start detached CODRAX-assisted project understanding for a target without generating tests."""
+        return evidence_start(Path(project_root), target, run_id or None)
+
+    @mcp.tool()
+    def gtestcov_evidence_status(project_root: str = ".", run_id: str = "") -> dict[str, Any]:
+        """Poll detached CODRAX-assisted project understanding status."""
+        return evidence_status(Path(project_root), run_id)
+
+    @mcp.tool()
+    def gtestcov_evidence_collect(project_root: str = ".", run_id: str = "") -> dict[str, Any]:
+        """Collect detached CODRAX-assisted project understanding after it completes."""
+        return evidence_collect(Path(project_root), run_id)
 
     @mcp.tool()
     def gtestcov_codrax_check(project_root: str = ".", run_id: str = "") -> dict[str, Any]:

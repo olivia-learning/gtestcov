@@ -39,6 +39,10 @@ RISK_HINT_RE = re.compile(r"\b(risk|hazard|unsafe|hardware|register|mmio|init|sh
 CODRAX_FINAL_OUTPUT_DIR = "codrax_final_outputs"
 CODRAX_FINAL_OUTPUT_INDEX = "index.json"
 CODRAX_LATEST_FINAL_LOG = "codrax_final_log.md"
+CODRAX_TIMEOUT_WARNING = "codrax_timeout_warning.md"
+CODRAX_PRE_TERMINATE_SNAPSHOT = "codrax_pre_terminate_snapshot.json"
+CODRAX_INTERRUPTED_MD = "codrax_interrupted.md"
+CODRAX_INTERRUPTED_JSON = "codrax_interrupted.json"
 
 
 class _CodraxTerminatedBySignal(BaseException):
@@ -107,7 +111,191 @@ def generate_codrax_evidence(project_root: Path, target: str, run_id: str | None
     return evidence, evidence_path
 
 
-def codrax_check(project_root: Path, profile: ProjectProfile | None = None, run_id: str | None = None) -> dict[str, Any]:
+def codrax_doctor(project_root: Path, profile: ProjectProfile | None = None, run_id: str | None = None) -> dict[str, Any]:
+    return _codrax_doctor(
+        project_root,
+        profile=profile,
+        run_id=run_id,
+        command_label="gtestcov codrax doctor",
+        step="codrax-doctor",
+        summary_name="codrax_doctor.json",
+    )
+
+
+def codrax_check(
+    project_root: Path,
+    profile: ProjectProfile | None = None,
+    run_id: str | None = None,
+    *,
+    mode: str = "deep",
+    target: str = "",
+    build_file: str = "",
+) -> dict[str, Any]:
+    if mode == "doctor":
+        return _codrax_doctor(
+            project_root,
+            profile=profile,
+            run_id=run_id,
+            command_label="gtestcov codrax-check",
+            step="codrax-check",
+            summary_name="codrax_check.json",
+        )
+    if mode == "quick":
+        return _codrax_quick_check(project_root, profile=profile, run_id=run_id, target=target, build_file=build_file)
+    if mode != "deep":
+        raise ValueError(f"unknown CODRAX check mode: {mode}")
+    return _codrax_deep_check(project_root, profile=profile, run_id=run_id)
+
+
+def _codrax_doctor(
+    project_root: Path,
+    *,
+    profile: ProjectProfile | None,
+    run_id: str | None,
+    command_label: str,
+    step: str,
+    summary_name: str,
+) -> dict[str, Any]:
+    root = project_root.resolve()
+    active_profile = profile or load_profile(root)
+    cfg = active_profile.evidence.codrax
+    active_run_id, run_dir = ensure_run_dir(root, run_id or "codrax-doctor")
+    update_run_status(
+        run_dir,
+        phase="codrax_doctor.start",
+        step=step,
+        command=command_label,
+        current_operation="checking_codrax_cli_protocol",
+    )
+    discovery = discover_codrax_cli(cfg)
+    resolved_program = discovery.get("resolved_program") or ""
+    if not _split_command(cfg.command):
+        status = "command_not_found"
+    elif not resolved_program:
+        status = "command_not_found"
+    elif discovery.get("supported"):
+        status = "ok"
+    else:
+        status = "unsupported_protocol"
+    result = {
+        "run_id": active_run_id,
+        "run_dir": str(run_dir),
+        "mode": "doctor",
+        "profile_enabled": cfg.enabled,
+        "command": cfg.command,
+        "configured_invocation": cfg.invocation,
+        "selected_invocation": discovery.get("selected_invocation", ""),
+        "discovery": discovery,
+        "available": bool(resolved_program),
+        "status": status,
+        "notes": discovery.get("notes", []),
+    }
+    summary_path = run_dir / summary_name
+    summary_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
+    update_run_status(
+        run_dir,
+        phase="codrax_doctor.done",
+        step=step,
+        command=command_label,
+        current_operation="codrax_doctor_complete",
+        last_artifact=str(summary_path),
+        notes=[f"status={status}"],
+        extra={"codrax_status": status, "codrax_check_mode": "doctor"},
+    )
+    return result
+
+
+def _codrax_quick_check(
+    project_root: Path,
+    *,
+    profile: ProjectProfile | None,
+    run_id: str | None,
+    target: str,
+    build_file: str,
+) -> dict[str, Any]:
+    root = project_root.resolve()
+    active_profile = profile or load_profile(root)
+    cfg = active_profile.evidence.codrax
+    active_run_id, run_dir = ensure_run_dir(root, run_id or "codrax-check-quick")
+    update_run_status(
+        run_dir,
+        phase="codrax_check.quick.start",
+        step="codrax-check",
+        command="gtestcov codrax-check --quick",
+        target=target,
+        current_operation="checking_explicit_codrax_files",
+    )
+    local_files, local_errors = _validate_quick_check_files(root, target, build_file)
+    discovery = discover_codrax_cli(cfg)
+    evidence = CodraxEvidence(enabled=True, command=cfg.command, invocation=cfg.invocation, status="local_input_error")
+    if local_errors:
+        evidence.notes.extend(local_errors)
+        evidence.available = bool(discovery.get("resolved_program"))
+        evidence.invocation = str(discovery.get("selected_invocation", ""))
+        _write_final_log(run_dir, evidence, [], {"tail_excerpt": ""}, cfg, "codrax_check_quick")
+    else:
+        probe_cfg = cfg.model_copy(update={"enabled": True, "require_file_line": True})
+        request = _build_quick_check_request(target, build_file)
+        evidence = _execute_codrax_request(
+            root,
+            probe_cfg,
+            request,
+            enabled=True,
+            run_dir=run_dir,
+            operation_name="codrax_check_quick",
+        )
+        allowed = {item["relative_path"] for item in local_files}
+        allowed_refs = [ref for ref in evidence.file_line_refs if _file_line_path(ref) in allowed]
+        if evidence.status == "ok" and not allowed_refs:
+            evidence.status = "insufficient"
+            evidence.notes.append("CODRAX quick check did not cite one of the explicit target/build-file inputs.")
+        evidence.notes.extend(f"local {item['role']} readable: {item['relative_path']}" for item in local_files)
+
+    result = {
+        "run_id": active_run_id,
+        "run_dir": str(run_dir),
+        "mode": "quick",
+        "profile_enabled": cfg.enabled,
+        "command": cfg.command,
+        "configured_invocation": cfg.invocation,
+        "selected_invocation": evidence.invocation,
+        "discovery": discovery,
+        "available": evidence.available,
+        "status": evidence.status,
+        "returncode": evidence.returncode,
+        "target": target,
+        "build_file": build_file,
+        "local_files": local_files,
+        "local_errors": local_errors,
+        "file_line_refs": evidence.file_line_refs,
+        "timeout_kind": evidence.timeout_kind,
+        "status_path": evidence.status_path,
+        "native_log_dir": evidence.native_log_dir,
+        "native_log_files": evidence.native_log_files,
+        "final_log_path": evidence.final_log_path,
+        "final_log_truncated": evidence.final_log_truncated,
+        "final_log_size_bytes": evidence.final_log_size_bytes,
+        "notes": evidence.notes,
+        "stdout_excerpt": evidence.stdout_excerpt,
+        "stderr_excerpt": evidence.stderr_excerpt,
+    }
+    summary_path = run_dir / "codrax_check.json"
+    summary_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
+    update_run_status(
+        run_dir,
+        phase="codrax_check.quick.done",
+        step="codrax-check",
+        command="gtestcov codrax-check --quick",
+        target=target,
+        current_operation="codrax_quick_check_complete",
+        last_artifact=str(summary_path),
+        notes=[f"status={evidence.status}", f"returncode={evidence.returncode}"],
+        extra={"codrax_status": evidence.status, "codrax_check_mode": "quick"},
+    )
+    return result
+
+
+def _codrax_deep_check(project_root: Path, profile: ProjectProfile | None = None, run_id: str | None = None) -> dict[str, Any]:
     root = project_root.resolve()
     active_profile = profile or load_profile(root)
     cfg = active_profile.evidence.codrax
@@ -142,6 +330,7 @@ Do not edit files.
     result = {
         "run_id": active_run_id,
         "run_dir": str(run_dir),
+        "mode": "deep",
         "profile_enabled": cfg.enabled,
         "command": cfg.command,
         "configured_invocation": cfg.invocation,
@@ -178,6 +367,56 @@ Do not edit files.
     return result
 
 
+def _validate_quick_check_files(root: Path, target: str, build_file: str) -> tuple[list[dict[str, str]], list[str]]:
+    files: list[dict[str, str]] = []
+    errors: list[str] = []
+    for role, raw_value in (("target", target), ("build_file", build_file)):
+        value = raw_value.strip()
+        if not value:
+            errors.append(f"missing required quick check {role}")
+            continue
+        candidate = Path(value)
+        path = candidate if candidate.is_absolute() else root / candidate
+        try:
+            resolved = path.resolve()
+            relative = resolved.relative_to(root)
+        except (OSError, ValueError):
+            errors.append(f"{role} is outside project root or cannot be resolved: {value}")
+            continue
+        if not resolved.exists():
+            errors.append(f"{role} does not exist: {relative.as_posix()}")
+            continue
+        if not resolved.is_file():
+            errors.append(f"{role} is not a file: {relative.as_posix()}")
+            continue
+        try:
+            with resolved.open("rb") as handle:
+                handle.read(1)
+        except OSError as exc:
+            errors.append(f"{role} is not readable: {relative.as_posix()} ({exc})")
+            continue
+        files.append({"role": role, "path": str(resolved), "relative_path": relative.as_posix()})
+    return files, errors
+
+
+def _build_quick_check_request(target: str, build_file: str) -> str:
+    return f"""Read-only CODRAX quick citation probe for gtestcov.
+
+Only inspect these explicit files:
+- target: {target}
+- build-file: {build_file}
+
+Do not perform a repository-wide search. Do not inspect unrelated files. Do not edit files.
+Return concise bullets with real file:line citations from the target or build-file.
+If either explicit file cannot be cited, say so explicitly.
+"""
+
+
+def _file_line_path(ref: str) -> str:
+    path = ref.rsplit(":", 1)[0].replace("\\", "/")
+    return path[2:] if path.startswith("./") else path
+
+
 def write_codrax_evidence(run_dir: Path, evidence: CodraxEvidence) -> Path:
     json_path = run_dir / "codrax_evidence.json"
     md_path = run_dir / "codrax_evidence.md"
@@ -206,6 +445,11 @@ def render_codrax_evidence(evidence: CodraxEvidence, include_raw: bool = False) 
         lines.append(f"- CODRAX native log files: `{len(evidence.native_log_files)}`")
     if evidence.final_log_path:
         lines.append(f"- Final diagnostic log: `{evidence.final_log_path}`")
+    if evidence.cache:
+        lines.append(
+            f"- Evidence cache: `{'hit' if evidence.cache.get('hit') else 'miss'}` "
+            f"({evidence.cache.get('hit_reason') or evidence.cache.get('miss_reason') or 'not recorded'})"
+        )
     if evidence.notes:
         lines.append("")
         lines.append("### Notes")
@@ -415,8 +659,13 @@ def _execute_codrax_request(
         evidence.native_log_files = native_state.get("files", [])
         evidence.native_log_tail_excerpt = native_state.get("tail_excerpt", "")
         _finalize_native_logs(evidence, native_log_dir, cfg)
-        evidence.notes.append(f"gtestcov received signal {exc.signum}; CODRAX child process was terminated and final diagnostics were recorded.")
+        evidence.notes.append(
+            f"gtestcov received signal {exc.signum}; CODRAX child process was terminated and final diagnostics were recorded. "
+            "Possible causes include user cancellation, terminal shutdown, CI timeout, or a parent process stopping gtestcov. "
+            "Recovery: inspect codrax_interrupted.json, codrax_status.json, and the final diagnostic log, then rerun with a stable terminal or larger timeout if needed."
+        )
         _write_final_log(run_dir, evidence, cmd, native_state, cfg, operation_name)
+        _write_interrupted_artifacts(run_dir, status_state, evidence, exc.signum, proc.pid, native_state)
         if run_dir:
             append_run_event(
                 run_dir,
@@ -449,6 +698,8 @@ def _execute_codrax_request(
                 "codrax_reported_stage": _infer_codrax_stage(evidence.native_log_tail_excerpt),
                 "native_log_last_line": _last_nonempty_line(evidence.native_log_tail_excerpt),
                 "final_log_path": evidence.final_log_path,
+                "interrupted_md_path": status_state.get("interrupted_md_path", ""),
+                "interrupted_json_path": status_state.get("interrupted_json_path", ""),
                 "notes": evidence.notes,
             },
         )
@@ -502,6 +753,8 @@ def _execute_codrax_request(
             "codrax_reported_stage": _infer_codrax_stage(evidence.native_log_tail_excerpt),
             "native_log_last_line": _last_nonempty_line(evidence.native_log_tail_excerpt),
             "final_log_path": evidence.final_log_path,
+            "timeout_warning_path": status_state.get("timeout_warning_path", ""),
+            "pre_terminate_snapshot_path": status_state.get("pre_terminate_snapshot_path", ""),
             "notes": evidence.notes,
         },
     )
@@ -531,14 +784,18 @@ def _collect_streaming_process(
     parsed = _empty_parse_accumulator()
     native_state: dict[str, Any] = {"files": [], "total_size": 0, "tail_excerpt": ""}
     last_activity = started
-    last_status_update = 0.0
+    last_status_update = started
     last_native_total_size = 0
+    heartbeat_interval = max(0.2, cfg.status_update_interval_seconds)
+    idle_warning_at = 0.0
+    soft_timeout_grace_seconds = min(0.5, heartbeat_interval)
 
     while True:
         try:
             stream_name, text = output_queue.get(timeout=0.2)
             last_output = time.monotonic()
             last_activity = last_output
+            idle_warning_at = 0.0
             if stream_name == "stdout":
                 stdout_excerpt = _append_tail(stdout_excerpt, text, cfg.max_output_chars)
                 _collect_codrax_line(text, parsed)
@@ -556,20 +813,21 @@ def _collect_streaming_process(
                 stderr_excerpt,
                 force=False,
             )
-            continue
         except queue.Empty:
             pass
 
         now = time.monotonic()
-        if native_log_dir and now - last_status_update >= max(0.2, cfg.status_update_interval_seconds):
+        if native_log_dir and now - last_status_update >= heartbeat_interval:
             native_state = _native_log_snapshot(native_log_dir, cfg)
             if int(native_state.get("total_size", 0)) > last_native_total_size:
                 last_native_total_size = int(native_state.get("total_size", 0))
                 last_activity = now
+                idle_warning_at = 0.0
+            phase = "running" if native_state.get("files") else "native_log_waiting"
             _maybe_update_codrax_status(
                 run_dir,
                 status_state,
-                "running" if native_state.get("files") else "native_log_waiting",
+                phase,
                 proc.pid,
                 started,
                 last_activity,
@@ -577,6 +835,7 @@ def _collect_streaming_process(
                 stdout_excerpt,
                 stderr_excerpt,
                 force=True,
+                emit_heartbeat=True,
             )
             last_status_update = now
 
@@ -592,11 +851,53 @@ def _collect_streaming_process(
                 native_state = _native_log_snapshot(native_log_dir, cfg)
             break
 
+        timeout_candidate = ""
         if cfg.max_runtime_seconds > 0 and now - started >= cfg.max_runtime_seconds:
-            timeout_kind = "max_runtime"
+            timeout_candidate = "max_runtime"
         elif cfg.idle_timeout_seconds > 0 and now - last_activity >= cfg.idle_timeout_seconds:
-            timeout_kind = "idle"
-        if timeout_kind:
+            timeout_candidate = "idle"
+        if timeout_candidate == "idle" and not idle_warning_at:
+            _write_timeout_warning_artifact(
+                run_dir,
+                status_state,
+                timeout_candidate,
+                proc.pid,
+                started,
+                last_activity,
+                native_state,
+                stdout_excerpt,
+                stderr_excerpt,
+                soft=True,
+            )
+            idle_warning_at = now
+            continue
+        if timeout_candidate == "idle" and now - idle_warning_at < soft_timeout_grace_seconds:
+            continue
+        if timeout_candidate:
+            timeout_kind = timeout_candidate
+            _write_timeout_warning_artifact(
+                run_dir,
+                status_state,
+                timeout_kind,
+                proc.pid,
+                started,
+                last_activity,
+                native_state,
+                stdout_excerpt,
+                stderr_excerpt,
+                soft=False,
+            )
+            _write_pre_terminate_snapshot(
+                run_dir,
+                status_state,
+                timeout_kind,
+                proc.pid,
+                started,
+                last_activity,
+                native_state,
+                stdout_excerpt,
+                stderr_excerpt,
+            )
             _terminate_process(proc)
             stdout_excerpt, stderr_excerpt = _drain_output_queue(
                 output_queue,
@@ -706,6 +1007,7 @@ def _maybe_update_codrax_status(
     stderr_excerpt: str,
     *,
     force: bool,
+    emit_heartbeat: bool = False,
 ) -> None:
     if not run_dir:
         return
@@ -730,6 +1032,330 @@ def _maybe_update_codrax_status(
             "stderr_tail_excerpt": stderr_excerpt[-1000:],
         },
     )
+    if emit_heartbeat:
+        _emit_codrax_heartbeat(run_dir, status_state, phase, pid, started, last_activity, native_state)
+
+
+def _emit_codrax_heartbeat(
+    run_dir: Path,
+    status_state: dict[str, Any],
+    phase: str,
+    pid: int | None,
+    started: float,
+    last_activity: float,
+    native_state: dict[str, Any],
+) -> None:
+    now = time.monotonic()
+    elapsed = round(max(0.0, now - started), 3)
+    last_activity_age = round(max(0.0, now - last_activity), 3)
+    operation = str(status_state.get("operation") or "codrax")
+    status_path = str(status_state.get("status_path") or (run_dir / CODRAX_STATUS))
+    native_files = native_state.get("files", [])
+    native_file_count = len(native_files) if isinstance(native_files, list) else 0
+    native_log_last_line = _last_nonempty_line(str(native_state.get("tail_excerpt", "")))
+    heartbeat = (
+        "[gtestcov] CODRAX heartbeat "
+        f"run_id={run_dir.name} operation={operation} phase={phase} pid={pid or ''} "
+        f"elapsed_seconds={elapsed} status_path={status_path} "
+        f"last_activity_seconds_ago={last_activity_age} native_log_files={native_file_count}"
+    )
+    try:
+        print(heartbeat, flush=True)
+    except BrokenPipeError:
+        pass
+    update_run_status(
+        run_dir,
+        phase="codrax.heartbeat",
+        step=operation,
+        command=str(status_state.get("command") or operation),
+        current_operation=f"{operation}:{phase}",
+        last_artifact=status_path,
+        notes=[
+            f"phase={phase}",
+            f"elapsed_seconds={elapsed}",
+            f"last_activity_seconds_ago={last_activity_age}",
+            f"status_path={status_path}",
+        ],
+        extra={
+            "codrax_status": phase,
+            "codrax_phase": phase,
+            "codrax_pid": pid,
+            "codrax_status_path": status_path,
+            "codrax_elapsed_seconds": elapsed,
+            "codrax_seconds_since_last_activity": last_activity_age,
+            "codrax_native_log_file_count": native_file_count,
+            "codrax_native_log_last_line": native_log_last_line,
+        },
+    )
+
+
+def _runtime_snapshot(
+    run_dir: Path,
+    status_state: dict[str, Any],
+    reason: str,
+    pid: int | None,
+    started: float,
+    last_activity: float,
+    native_state: dict[str, Any],
+    stdout_excerpt: str,
+    stderr_excerpt: str,
+) -> dict[str, Any]:
+    now = time.monotonic()
+    return {
+        "ts": utc_now(),
+        "run_id": run_dir.name,
+        "operation": status_state.get("operation", "codrax"),
+        "reason": reason,
+        "pid": pid,
+        "elapsed_seconds": round(max(0.0, now - started), 3),
+        "seconds_since_last_activity": round(max(0.0, now - last_activity), 3),
+        "command": status_state.get("command", ""),
+        "status_path": status_state.get("status_path") or str(run_dir / CODRAX_STATUS),
+        "native_log_dir": status_state.get("native_log_dir", ""),
+        "native_log_files": native_state.get("files", []),
+        "native_log_total_size": native_state.get("total_size", 0),
+        "native_log_tail_excerpt": native_state.get("tail_excerpt", ""),
+        "native_log_last_line": _last_nonempty_line(str(native_state.get("tail_excerpt", ""))),
+        "stdout_tail_excerpt": stdout_excerpt[-1000:],
+        "stderr_tail_excerpt": stderr_excerpt[-1000:],
+        "recovery_suggestions": _timeout_recovery_suggestions(reason),
+    }
+
+
+def _write_timeout_warning_artifact(
+    run_dir: Path | None,
+    status_state: dict[str, Any],
+    timeout_kind: str,
+    pid: int | None,
+    started: float,
+    last_activity: float,
+    native_state: dict[str, Any],
+    stdout_excerpt: str,
+    stderr_excerpt: str,
+    *,
+    soft: bool,
+) -> None:
+    if not run_dir:
+        return
+    path = run_dir / CODRAX_TIMEOUT_WARNING
+    snapshot = _runtime_snapshot(run_dir, status_state, timeout_kind, pid, started, last_activity, native_state, stdout_excerpt, stderr_excerpt)
+    mode = "soft warning" if soft else "hard timeout"
+    text = "\n".join(
+        [
+            "# CODRAX Timeout Warning",
+            "",
+            f"- Run id: `{run_dir.name}`",
+            f"- Operation: `{snapshot['operation']}`",
+            f"- Timeout kind: `{timeout_kind}`",
+            f"- Mode: `{mode}`",
+            f"- Elapsed seconds: `{snapshot['elapsed_seconds']}`",
+            f"- Seconds since last activity: `{snapshot['seconds_since_last_activity']}`",
+            f"- Native log files: `{len(snapshot['native_log_files'])}`",
+            f"- Native log last line: `{snapshot['native_log_last_line'] or 'none'}`",
+            "",
+            "## What Happened",
+            "gtestcov detected that the CODRAX request crossed a configured timeout boundary.",
+            "For an idle timeout, gtestcov writes this warning first and waits briefly; if CODRAX native logs keep growing, the request is allowed to continue.",
+            "",
+            "## Recovery",
+            *[f"- {item}" for item in snapshot["recovery_suggestions"]],
+            "",
+            "## Recent stdout",
+            "```text",
+            snapshot["stdout_tail_excerpt"],
+            "```",
+            "",
+            "## Recent stderr",
+            "```text",
+            snapshot["stderr_tail_excerpt"],
+            "```",
+            "",
+            "## Native log tail",
+            "```text",
+            str(snapshot["native_log_tail_excerpt"]),
+            "```",
+        ]
+    ).rstrip() + "\n"
+    path.write_text(text, encoding="utf-8")
+    status_state["timeout_warning_path"] = str(path)
+    _write_codrax_status(
+        run_dir,
+        {
+            **{key: value for key, value in status_state.items() if not key.startswith("_")},
+            "status": "timeout_warning",
+            "phase": f"{timeout_kind}_timeout_warning",
+            "pid": pid,
+            "timeout_kind": timeout_kind,
+            "seconds_since_last_output": snapshot["seconds_since_last_activity"],
+            "native_log_files": snapshot["native_log_files"],
+            "native_log_tail_excerpt": snapshot["native_log_tail_excerpt"],
+            "native_log_last_line": snapshot["native_log_last_line"],
+            "stdout_tail_excerpt": snapshot["stdout_tail_excerpt"],
+            "stderr_tail_excerpt": snapshot["stderr_tail_excerpt"],
+        },
+    )
+    append_run_event(
+        run_dir,
+        "codrax.timeout_warning",
+        step=str(snapshot["operation"]),
+        current_operation=f"{timeout_kind}_{'soft_warning' if soft else 'hard_timeout'}",
+        artifact=str(path),
+        notes=[f"timeout_kind={timeout_kind}", f"soft={soft}"],
+    )
+    update_run_status(
+        run_dir,
+        phase="codrax.timeout_warning",
+        step=str(snapshot["operation"]),
+        command=str(status_state.get("command") or snapshot["operation"]),
+        current_operation=f"{timeout_kind}_{'soft_warning' if soft else 'hard_timeout'}",
+        last_artifact=str(path),
+        notes=[f"timeout_kind={timeout_kind}", f"soft={soft}", f"status_path={snapshot['status_path']}"],
+        extra={
+            "codrax_status": "timeout_warning",
+            "timeout_kind": timeout_kind,
+            "codrax_timeout_warning_path": str(path),
+            "codrax_seconds_since_last_activity": snapshot["seconds_since_last_activity"],
+        },
+    )
+
+
+def _write_pre_terminate_snapshot(
+    run_dir: Path | None,
+    status_state: dict[str, Any],
+    timeout_kind: str,
+    pid: int | None,
+    started: float,
+    last_activity: float,
+    native_state: dict[str, Any],
+    stdout_excerpt: str,
+    stderr_excerpt: str,
+) -> None:
+    if not run_dir:
+        return
+    path = run_dir / CODRAX_PRE_TERMINATE_SNAPSHOT
+    snapshot = _runtime_snapshot(run_dir, status_state, timeout_kind, pid, started, last_activity, native_state, stdout_excerpt, stderr_excerpt)
+    path.write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
+    status_state["pre_terminate_snapshot_path"] = str(path)
+    _write_codrax_status(
+        run_dir,
+        {
+            **{key: value for key, value in status_state.items() if not key.startswith("_")},
+            "status": "terminating",
+            "phase": f"{timeout_kind}_pre_terminate",
+            "pid": pid,
+            "timeout_kind": timeout_kind,
+            "pre_terminate_snapshot_path": str(path),
+            "seconds_since_last_output": snapshot["seconds_since_last_activity"],
+            "native_log_files": snapshot["native_log_files"],
+            "native_log_tail_excerpt": snapshot["native_log_tail_excerpt"],
+            "native_log_last_line": snapshot["native_log_last_line"],
+            "stdout_tail_excerpt": snapshot["stdout_tail_excerpt"],
+            "stderr_tail_excerpt": snapshot["stderr_tail_excerpt"],
+        },
+    )
+    append_run_event(
+        run_dir,
+        "codrax.pre_terminate_snapshot",
+        step=str(snapshot["operation"]),
+        current_operation=f"{timeout_kind}_pre_terminate_snapshot",
+        artifact=str(path),
+        notes=[f"timeout_kind={timeout_kind}", f"pid={pid}"],
+    )
+
+
+def _write_interrupted_artifacts(
+    run_dir: Path | None,
+    status_state: dict[str, Any],
+    evidence: CodraxEvidence,
+    signum: int,
+    pid: int | None,
+    native_state: dict[str, Any],
+) -> None:
+    if not run_dir:
+        return
+    md_path = run_dir / CODRAX_INTERRUPTED_MD
+    json_path = run_dir / CODRAX_INTERRUPTED_JSON
+    possible_causes = [
+        "The user or parent process cancelled gtestcov.",
+        "The terminal, OpenCode session, CI job, or shell was closed.",
+        "An external timeout manager stopped the process.",
+    ]
+    recovery_suggestions = [
+        "Inspect codrax_status.json and codrax_final_log.md to see the last recorded CODRAX activity.",
+        "Inspect CODRAX native logs if native_log_dir is present.",
+        "Rerun in a stable terminal/session, or increase idle/max runtime settings if the request was expected to run longer.",
+    ]
+    data = {
+        "ts": utc_now(),
+        "run_id": run_dir.name,
+        "operation": status_state.get("operation", "codrax"),
+        "status": evidence.status,
+        "signal": signum,
+        "pid": pid,
+        "timeout_kind": evidence.timeout_kind,
+        "status_path": status_state.get("status_path") or str(run_dir / CODRAX_STATUS),
+        "final_log_path": evidence.final_log_path,
+        "native_log_dir": evidence.native_log_dir,
+        "native_log_files": evidence.native_log_files,
+        "native_log_tail_excerpt": native_state.get("tail_excerpt", ""),
+        "native_log_last_line": _last_nonempty_line(str(native_state.get("tail_excerpt", ""))),
+        "possible_causes": possible_causes,
+        "recovery_suggestions": recovery_suggestions,
+        "notes": evidence.notes,
+    }
+    json_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    md_path.write_text(
+        "\n".join(
+            [
+                "# CODRAX Interrupted",
+                "",
+                f"- Run id: `{run_dir.name}`",
+                f"- Operation: `{data['operation']}`",
+                f"- Status: `{evidence.status}`",
+                f"- Signal: `{signum}`",
+                f"- Final diagnostic log: `{evidence.final_log_path or 'none'}`",
+                "",
+                "## Possible Causes",
+                *[f"- {item}" for item in possible_causes],
+                "",
+                "## Recovery",
+                *[f"- {item}" for item in recovery_suggestions],
+                "",
+                "## Native log tail",
+                "```text",
+                str(native_state.get("tail_excerpt", "")),
+                "```",
+            ]
+        ).rstrip()
+        + "\n",
+        encoding="utf-8",
+    )
+    status_state["interrupted_md_path"] = str(md_path)
+    status_state["interrupted_json_path"] = str(json_path)
+    append_run_event(
+        run_dir,
+        "codrax.interrupted_artifacts",
+        step=str(data["operation"]),
+        current_operation="interrupted_artifacts_written",
+        artifact=str(json_path),
+        notes=[f"signal={signum}", f"status={evidence.status}"],
+    )
+
+
+def _timeout_recovery_suggestions(timeout_kind: str) -> list[str]:
+    if timeout_kind == "idle":
+        return [
+            "Check whether CODRAX native logs are still growing; if they are, rerun with a larger idle_timeout_seconds.",
+            "Inspect codrax_pre_terminate_snapshot.json before rerunning the same request.",
+            "Reduce the request scope or use codrax-check --quick when only explicit files need validation.",
+        ]
+    if timeout_kind == "max_runtime":
+        return [
+            "Inspect codrax_pre_terminate_snapshot.json and the final diagnostic log for the last completed CODRAX stage.",
+            "Reduce the request scope, use codrax-check doctor/quick first, or increase max_runtime_seconds if the deep request is expected.",
+            "Consider splitting broad repository questions into smaller target-specific requests.",
+        ]
+    return ["Inspect the run artifacts and rerun with a narrower CODRAX request if needed."]
 
 
 def _native_log_snapshot(native_log_dir: Path, cfg: CodraxEvidenceConfig) -> dict[str, Any]:
@@ -759,6 +1385,22 @@ def _read_file_tail(path: Path, max_bytes: int) -> str:
     except OSError:
         return ""
     return data.decode("utf-8", errors="replace")
+
+
+def _bounded_utf8_tail(marker: str, encoded: bytes, max_bytes: int) -> str:
+    if max_bytes <= 0:
+        return ""
+    marker_bytes = marker.encode("utf-8")
+    if len(marker_bytes) >= max_bytes:
+        return marker_bytes[:max_bytes].decode("utf-8", errors="ignore")
+    keep = max_bytes - len(marker_bytes)
+    tail = encoded[-keep:] if keep else b""
+    while True:
+        text = marker + tail.decode("utf-8", errors="replace")
+        encoded_len = len(text.encode("utf-8"))
+        if encoded_len <= max_bytes or not tail:
+            return text
+        tail = tail[min(len(tail), max(1, encoded_len - max_bytes)) :]
 
 
 def _finalize_native_logs(evidence: CodraxEvidence, native_log_dir: Path | None, cfg: CodraxEvidenceConfig) -> None:
@@ -818,12 +1460,10 @@ def _write_final_log(
     encoded = text.encode("utf-8")
     if cfg.final_log_max_bytes > 0 and len(encoded) > cfg.final_log_max_bytes:
         marker = "[gtestcov] final CODRAX diagnostic log truncated; keeping newest bytes.\n"
-        keep = max(0, cfg.final_log_max_bytes - len(marker.encode("utf-8")))
-        tail = encoded[-keep:] if keep else b""
-        text = marker + tail.decode("utf-8", errors="replace")
+        text = _bounded_utf8_tail(marker, encoded, cfg.final_log_max_bytes)
         evidence.final_log_truncated = True
-    path.write_text(text, encoding="utf-8")
-    latest_path.write_text(text, encoding="utf-8")
+    path.write_bytes(text.encode("utf-8"))
+    latest_path.write_bytes(text.encode("utf-8"))
     evidence.final_log_path = str(path)
     evidence.final_log_size_bytes = path.stat().st_size
     _append_final_output_index(run_dir, evidence, operation_name, path, latest_path)

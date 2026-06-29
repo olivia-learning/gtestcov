@@ -4,7 +4,8 @@ import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-from .fs import CPP_SUFFIXES, iter_files, read_text
+from .file_index import load_file_index
+from .fs import CPP_SUFFIXES, iter_files, read_text, scan_roots_from_profile
 from .models import DependencyEntry, DependencyReport, SymbolReport, relpath
 from .profile import ProjectProfile
 
@@ -106,47 +107,81 @@ def _infer_treatment(name: str, local_path: str) -> str:
 
 
 def classify_symbol(project_root: Path, symbol: str, profile: ProjectProfile) -> SymbolReport:
+    reports = classify_symbols_bulk(project_root, [symbol], profile)
+    return reports[0] if reports else SymbolReport(symbol=symbol, kind="unknown", recommendation=_symbol_recommendation(symbol, "unknown"))
+
+
+def classify_symbols_bulk(project_root: Path, symbols: list[str], profile: ProjectProfile) -> list[SymbolReport]:
+    unique_symbols = list(dict.fromkeys(symbol for symbol in symbols if symbol))
+    if not unique_symbols:
+        return []
+    reports = {
+        symbol: SymbolReport(symbol=symbol, kind="unknown", locations=[], recommendation=_symbol_recommendation(symbol, "unknown"))
+        for symbol in unique_symbols
+    }
     roots = [project_root]
     for dep_root in profile.dependency.dependency_root:
         path = project_root / dep_root
         if path.exists():
             roots.insert(0, path)
 
-    locations: list[str] = []
-    kind = "unknown"
     for root in roots:
-        for path in iter_files(root, CPP_SUFFIXES):
+        for path in _candidate_symbol_files(project_root, root, profile):
             text = read_text(path)
-            if symbol not in text:
+            present = [symbol for symbol in unique_symbols if symbol in text]
+            if not present:
                 continue
-            for line in text.splitlines():
-                if symbol not in line:
+            for line_number, line in enumerate(text.splitlines(), start=1):
+                line_symbols = [symbol for symbol in present if symbol in line]
+                if not line_symbols:
                     continue
-                locations.append(f"{relpath(path, project_root)}:{_line_number(text, line)}")
                 stripped = line.strip()
-                if re.search(rf"#\s*define\s+{re.escape(symbol)}\b", stripped):
-                    kind = "macro"
-                elif "static inline" in stripped and symbol in stripped:
-                    kind = "static inline"
-                elif "__attribute__((weak))" in stripped or "__weak" in stripped or " weak " in f" {stripped} ":
-                    kind = "weak"
-                elif re.search(rf"\bextern\b.*\b{re.escape(symbol)}\b", stripped):
-                    kind = "extern function"
-                elif re.search(rf"\b{re.escape(symbol)}\s*\([^;]*\)\s*;", stripped):
-                    kind = "extern function"
-    return SymbolReport(
-        symbol=symbol,
-        kind=kind,
-        locations=sorted(set(locations)),
-        recommendation=_symbol_recommendation(symbol, kind),
-    )
+                for symbol in line_symbols:
+                    report = reports[symbol]
+                    report.locations.append(f"{relpath(path, project_root)}:{line_number}")
+                    report.kind = _classify_symbol_line(symbol, stripped, report.kind)
+    result: list[SymbolReport] = []
+    for symbol in unique_symbols:
+        report = reports[symbol]
+        report.locations = sorted(set(report.locations))
+        report.recommendation = _symbol_recommendation(symbol, report.kind)
+        result.append(report)
+    return result
 
 
-def _line_number(text: str, needle: str) -> int:
-    for idx, line in enumerate(text.splitlines(), start=1):
-        if line == needle:
-            return idx
-    return 1
+def _candidate_symbol_files(project_root: Path, root: Path, profile: ProjectProfile) -> list[Path]:
+    if root == project_root:
+        index = load_file_index(project_root)
+        if index.get("project_root") == str(project_root.resolve()) and isinstance(index.get("files"), dict):
+            files = []
+            for rel, record in index["files"].items():
+                if str(record.get("suffix", "")).lower() in CPP_SUFFIXES:
+                    path = project_root / rel
+                    if path.exists() and path.is_file():
+                        files.append(path)
+            return files
+        return iter_files(
+            root,
+            CPP_SUFFIXES,
+            scan_roots=scan_roots_from_profile(profile),
+            exclude_dirs=profile.paths.exclude_dirs,
+            max_files=profile.paths.max_files,
+        )
+    return iter_files(root, CPP_SUFFIXES, exclude_dirs=profile.paths.exclude_dirs, max_files=profile.paths.max_files)
+
+
+def _classify_symbol_line(symbol: str, stripped: str, current_kind: str) -> str:
+    if re.search(rf"#\s*define\s+{re.escape(symbol)}\b", stripped):
+        return "macro"
+    if "static inline" in stripped and symbol in stripped:
+        return "static inline"
+    if "__attribute__((weak))" in stripped or "__weak" in stripped or " weak " in f" {stripped} ":
+        return "weak"
+    if re.search(rf"\bextern\b.*\b{re.escape(symbol)}\b", stripped):
+        return "extern function"
+    if re.search(rf"\b{re.escape(symbol)}\s*\([^;]*\)\s*;", stripped):
+        return "extern function"
+    return current_kind
 
 
 def _symbol_recommendation(symbol: str, kind: str) -> str:
@@ -163,4 +198,4 @@ def _symbol_recommendation(symbol: str, kind: str) -> str:
 
 def classify_default_symbols(project_root: Path, profile: ProjectProfile, extra: list[str] | None = None) -> list[SymbolReport]:
     symbols = list(dict.fromkeys(list(profile.embedded_policy.memory_api.keys()) + (extra or [])))
-    return [classify_symbol(project_root, symbol, profile) for symbol in symbols]
+    return classify_symbols_bulk(project_root, symbols, profile)

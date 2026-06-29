@@ -8,19 +8,30 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
 import gtestcov.version as version_module
 from gtestcov.cover import cover_target
 from gtestcov.coverage_goal import write_coverage_goal
 from gtestcov.diagnose import diagnose_failure
-from gtestcov.analyzer import analyze_target
+from gtestcov.analyzer import analyze_target, inspect_target
 from gtestcov.codrax import codrax_check, generate_codrax_evidence
-from gtestcov.dependency import classify_symbol, parse_dependency_xml
+from gtestcov.dependency import classify_symbol, classify_symbols_bulk, parse_dependency_xml
+import gtestcov.dependency as dependency_module
+from gtestcov.detached_evidence import evidence_collect, evidence_status
 from gtestcov.discovery import discover_project
+from gtestcov.evidence_backend import CodraxEvidenceBackend, collect_evidence_hits
+from gtestcov.evidence_pack import CODRAX_PAYLOAD, EVIDENCE_PACK_SCHEMA_VERSION, _cache_identity, load_codrax_payload
+from gtestcov.evidence_types import EvidenceQuery, EvidenceHit
+from gtestcov.file_index import index_build
+from gtestcov.fs import ensure_run_dir
 from gtestcov.memory import refresh_memory, show_memory
 from gtestcov.preflight import preflight_check
 from gtestcov.profile_sync import profile_sync
 import gtestcov.profile_sync as profile_sync_module
 from gtestcov.profile import load_profile, profile_to_yaml
+from gtestcov.search_backend import search_doctor, search_index, search_query
+from gtestcov.semantic_backend import semantic_doctor, semantic_overview, semantic_references
 from gtestcov.task import build_task, render_task
 from gtestcov.understanding import generate_project_understanding
 from gtestcov.models import (
@@ -72,6 +83,33 @@ def write_fake_codrax(tmp_path: Path, output: str, returncode: int = 0) -> str:
         "    log_dir = pathlib.Path(args.log_dir)\n"
         "    log_dir.mkdir(parents=True, exist_ok=True)\n"
         "    (log_dir / 'fake_codrax.log').write_text(output, encoding='utf-8')\n"
+        "sys.stdout.write(output)\n"
+        f"sys.exit({returncode})\n",
+        encoding="utf-8",
+    )
+    return f'"{sys.executable}" "{script}"'
+
+
+def write_counting_fake_codrax(tmp_path: Path, log_path: Path, output: str, returncode: int = 0) -> str:
+    script = tmp_path / "fake_codrax_counting.py"
+    script.write_text(
+        "import argparse\n"
+        "import pathlib\n"
+        "import sys\n"
+        "parser = argparse.ArgumentParser()\n"
+        "parser.add_argument('--repo')\n"
+        "parser.add_argument('--request')\n"
+        "parser.add_argument('--log-dir')\n"
+        "args = parser.parse_args()\n"
+        f"log_path = pathlib.Path({str(log_path)!r})\n"
+        "log_path.parent.mkdir(parents=True, exist_ok=True)\n"
+        "with log_path.open('a', encoding='utf-8') as handle:\n"
+        "    handle.write((args.request or '').splitlines()[0] + '\\n')\n"
+        f"output = {output!r}\n"
+        "if args.log_dir:\n"
+        "    log_dir = pathlib.Path(args.log_dir)\n"
+        "    log_dir.mkdir(parents=True, exist_ok=True)\n"
+        "    (log_dir / 'fake_codrax_counting.log').write_text(output, encoding='utf-8')\n"
         "sys.stdout.write(output)\n"
         f"sys.exit({returncode})\n",
         encoding="utf-8",
@@ -136,6 +174,33 @@ def write_fake_streaming_codrax(tmp_path: Path, events: list[tuple[str, str, flo
     return f'"{sys.executable}" "{script}"'
 
 
+def write_fake_codrax_check_logger(tmp_path: Path, log_path: Path) -> str:
+    script = tmp_path / "fake_codrax_check_logger.py"
+    script.write_text(
+        "import json\n"
+        "import pathlib\n"
+        "import sys\n"
+        f"log_path = pathlib.Path({str(log_path)!r})\n"
+        "log_path.parent.mkdir(parents=True, exist_ok=True)\n"
+        "with log_path.open('a', encoding='utf-8') as handle:\n"
+        "    handle.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+        "args = sys.argv[1:]\n"
+        "if args in (['--help'], ['help']):\n"
+        "    print('Usage: codrax --repo <repo> --request <request>')\n"
+        "    sys.exit(0)\n"
+        "if args == ['--version']:\n"
+        "    print('codrax fake 1.0')\n"
+        "    sys.exit(0)\n"
+        "request = args[args.index('--request') + 1] if '--request' in args else ''\n"
+        "if 'quick citation probe' in request:\n"
+        "    sys.stdout.write('- target: src/energy_service.cpp:12 is readable.\\n- build: CMakeLists.txt:1 is readable.\\n')\n"
+        "else:\n"
+        "    sys.stdout.write('- deep: CMakeLists.txt:1 is the repository build anchor.\\n')\n",
+        encoding="utf-8",
+    )
+    return f'"{sys.executable}" "{script}"'
+
+
 def write_fake_long_running_codrax(tmp_path: Path) -> str:
     script = tmp_path / "fake_codrax_long.py"
     script.write_text(
@@ -160,6 +225,56 @@ def write_fake_long_running_codrax(tmp_path: Path) -> str:
         "        with log_file.open('a', encoding='utf-8') as handle:\n"
         "            handle.write(line + '\\n')\n"
         "    time.sleep(0.2)\n",
+        encoding="utf-8",
+    )
+    return f'"{sys.executable}" "{script}"'
+
+
+def write_fake_silent_codrax(tmp_path: Path, delay_seconds: float = 1.2) -> str:
+    script = tmp_path / "fake_codrax_silent.py"
+    script.write_text(
+        "import argparse\n"
+        "import pathlib\n"
+        "import sys\n"
+        "import time\n"
+        "parser = argparse.ArgumentParser()\n"
+        "parser.add_argument('--repo')\n"
+        "parser.add_argument('--request')\n"
+        "parser.add_argument('--log-dir')\n"
+        "args = parser.parse_args()\n"
+        "if args.log_dir:\n"
+        "    pathlib.Path(args.log_dir).mkdir(parents=True, exist_ok=True)\n"
+        f"time.sleep({delay_seconds!r})\n"
+        "sys.exit(0)\n",
+        encoding="utf-8",
+    )
+    return f'"{sys.executable}" "{script}"'
+
+
+def write_fake_native_log_growth_codrax(tmp_path: Path, writes: int = 6, delay_seconds: float = 0.25) -> str:
+    script = tmp_path / "fake_codrax_native_growth.py"
+    script.write_text(
+        "import argparse\n"
+        "import pathlib\n"
+        "import sys\n"
+        "import time\n"
+        "parser = argparse.ArgumentParser()\n"
+        "parser.add_argument('--repo')\n"
+        "parser.add_argument('--request')\n"
+        "parser.add_argument('--log-dir')\n"
+        "args = parser.parse_args()\n"
+        "log_file = None\n"
+        "if args.log_dir:\n"
+        "    log_dir = pathlib.Path(args.log_dir)\n"
+        "    log_dir.mkdir(parents=True, exist_ok=True)\n"
+        "    log_file = log_dir / 'fake_codrax_native_growth.log'\n"
+        f"for index in range({writes!r}):\n"
+        "    if log_file:\n"
+        "        with log_file.open('a', encoding='utf-8') as handle:\n"
+        "            handle.write(f'native progress {index}\\n')\n"
+        f"    time.sleep({delay_seconds!r})\n"
+        "sys.stdout.write('- final: src/energy_service.cpp:12 finished after native log progress.\\n')\n"
+        "sys.exit(0)\n",
         encoding="utf-8",
     )
     return f'"{sys.executable}" "{script}"'
@@ -242,6 +357,477 @@ def test_default_profile_enables_codrax() -> None:
 
     assert profile.evidence.codrax.enabled is True
     assert profile.evidence.codrax.command == "codrax"
+    assert profile.paths.source_roots == ["src"]
+    assert profile.paths.test_roots == ["tests"]
+    assert profile.paths.build_roots == ["."]
+
+
+def test_legacy_profile_gets_default_paths(tmp_path: Path) -> None:
+    root = tmp_path / "legacy_profile"
+    root.mkdir()
+    (root / "project_profile.yaml").write_text("project_name: legacy\n", encoding="utf-8")
+
+    profile = load_profile(root)
+
+    assert profile.project_name == "legacy"
+    assert profile.paths.exclude_dirs
+    assert profile.paths.max_files == 8000
+
+
+def test_profile_rejects_configured_roots_outside_project(tmp_path: Path) -> None:
+    root = tmp_path / "unsafe_profile"
+    root.mkdir()
+    (root / "project_profile.yaml").write_text(
+        "project_name: unsafe\n"
+        "paths:\n"
+        "  source_roots:\n"
+        "    - ../outside\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="escapes project root"):
+        load_profile(root)
+
+
+def test_run_id_is_sanitized_and_stays_under_runs_dir(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+
+    run_id, run_dir = ensure_run_dir(root, "../bad/id with spaces")
+
+    assert run_id == "bad_id_with_spaces"
+    assert run_dir.parent == (root / ".gtestcov" / "runs").resolve()
+    assert run_dir.exists()
+    assert not (tmp_path / "bad").exists()
+
+
+def test_target_path_cannot_escape_project_root(tmp_path: Path) -> None:
+    root = copy_mini_repo(tmp_path)
+    outside = tmp_path / "outside.cpp"
+    outside.write_text("int outside = 0;\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="escapes project root"):
+        analyze_target(root, "../outside.cpp", run_id="escape-target")
+
+
+def test_discovery_uses_profile_scan_scope_and_excludes(tmp_path: Path) -> None:
+    root = tmp_path / "scoped_project"
+    (root / "src").mkdir(parents=True)
+    (root / "tests").mkdir()
+    (root / "third_party").mkdir()
+    (root / "src" / "main.cpp").write_text("int main_symbol = 0;\n", encoding="utf-8")
+    (root / "tests" / "main_test.cpp").write_text('#include "gtest/gtest.h"\nTEST(Main, Works) {}\n', encoding="utf-8")
+    (root / "third_party" / "vendor_test.cpp").write_text('#include "gtest/gtest.h"\nTEST(Vendor, Ignored) {}\n', encoding="utf-8")
+    (root / "CMakeLists.txt").write_text("cmake_minimum_required(VERSION 3.20)\n", encoding="utf-8")
+    (root / "project_profile.yaml").write_text(
+        "project_name: scoped_project\n"
+        "paths:\n"
+        "  source_roots: [src]\n"
+        "  test_roots: [tests]\n"
+        "  build_roots: [.]\n"
+        "  exclude_dirs: [.git, .gtestcov, third_party]\n",
+        encoding="utf-8",
+    )
+
+    discovery = discover_project(root)
+
+    assert discovery.test_macros["TEST"] == 1
+    assert discovery.test_files == ["tests/main_test.cpp"]
+    assert "third_party/vendor_test.cpp" not in discovery.gtest_includes
+    assert discovery.build_files == ["CMakeLists.txt"]
+
+
+def test_discovery_writes_scan_progress_and_truncation_artifact(tmp_path: Path) -> None:
+    root = tmp_path / "truncated_scan"
+    (root / "src").mkdir(parents=True)
+    (root / "tests").mkdir()
+    for index in range(5):
+        (root / "src" / f"file_{index}.cpp").write_text(f"int value_{index} = {index};\n", encoding="utf-8")
+    (root / "tests" / "scan_test.cpp").write_text('#include "gtest/gtest.h"\nTEST(Scan, Works) {}\n', encoding="utf-8")
+    (root / "project_profile.yaml").write_text(
+        "project_name: truncated_scan\n"
+        "paths:\n"
+        "  source_roots: [src]\n"
+        "  test_roots: [tests]\n"
+        "  build_roots: []\n"
+        "  exclude_dirs: [.git, .gtestcov]\n"
+        "  max_files: 2\n",
+        encoding="utf-8",
+    )
+
+    discovery = discover_project(root)
+    progress = json.loads((root / ".gtestcov" / "discovery_scan_progress.json").read_text(encoding="utf-8"))
+    truncated = (root / ".gtestcov" / "scan_truncated.md").read_text(encoding="utf-8")
+
+    assert len(discovery.test_files) <= 1
+    assert progress["all_files"]["truncated"] is True
+    assert progress["all_files"]["matched"] == 2
+    assert progress["cpp_files"]["truncated"] is True
+    assert "gtestcov Scan Truncated" in truncated
+    assert "paths.max_files" in truncated
+
+
+def test_file_index_build_status_refresh_and_discovery_hit(tmp_path: Path) -> None:
+    root = tmp_path / "indexed_project"
+    (root / "src").mkdir(parents=True)
+    (root / "tests").mkdir()
+    (root / "src" / "indexed.cpp").write_text("int indexed = 1;\n", encoding="utf-8")
+    (root / "src" / "CMakeLists.txt").write_text("add_library(indexed indexed.cpp)\n", encoding="utf-8")
+    (root / "tests" / "indexed_test.cpp").write_text('#include "gtest/gtest.h"\nTEST(Indexed, Works) {}\n', encoding="utf-8")
+    (root / "project_profile.yaml").write_text(
+        "project_name: indexed_project\n"
+        "paths:\n"
+        "  source_roots: [src]\n"
+        "  test_roots: [tests]\n"
+        "  build_roots: []\n",
+        encoding="utf-8",
+    )
+    env = {**dict(subprocess.os.environ), "PYTHONPATH": str(REPO_ROOT / "src")}
+
+    missing = subprocess.run(
+        [sys.executable, "-m", "gtestcov.cli", "index", "status", "--project-root", str(root)],
+        cwd=REPO_ROOT,
+        env=env,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    built = subprocess.run(
+        [sys.executable, "-m", "gtestcov.cli", "index", "build", "--project-root", str(root)],
+        cwd=REPO_ROOT,
+        env=env,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    (root / "src" / "indexed.cpp").write_text("int indexed = 2;\n", encoding="utf-8")
+    refreshed = subprocess.run(
+        [sys.executable, "-m", "gtestcov.cli", "index", "refresh", "--project-root", str(root)],
+        cwd=REPO_ROOT,
+        env=env,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    discovery = discover_project(root)
+    progress = json.loads((root / ".gtestcov" / "discovery_scan_progress.json").read_text(encoding="utf-8"))
+
+    missing_data = json.loads(missing.stdout)
+    built_data = json.loads(built.stdout)
+    refreshed_data = json.loads(refreshed.stdout)
+    index = json.loads((root / ".gtestcov" / "cache" / "file_index.json").read_text(encoding="utf-8"))
+
+    assert missing_data["status"] == "missing"
+    assert missing_data["miss_reason"] == "file_index_missing"
+    assert built_data["status"] == "built"
+    assert built_data["hit"] is True
+    assert refreshed_data["status"] == "built"
+    assert refreshed_data["changed_count"] >= 1
+    assert index["file_count"] == 3
+    assert "src/indexed.cpp" in index["files"]
+    assert index["files"]["src/indexed.cpp"]["is_cpp"] is True
+    assert index["files"]["tests/indexed_test.cpp"]["contains_gtest_or_gmock"] is True
+    assert index["files"]["src/CMakeLists.txt"]["is_build_config"] is True
+    assert discovery.test_files == ["tests/indexed_test.cpp"]
+    assert progress["file_index"]["hit"] is True
+    assert progress["file_index"]["hit_reason"] == "index_present"
+
+
+def test_evidence_backends_return_uniform_hits(tmp_path: Path) -> None:
+    root = tmp_path / "evidence_backends"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "target.cpp").write_text("extern void BACKEND_SYMBOL();\nvoid call() { BACKEND_SYMBOL(); }\n", encoding="utf-8")
+    (root / "project_profile.yaml").write_text(
+        "project_name: evidence_backends\n"
+        "paths:\n"
+        "  source_roots: [src]\n"
+        "  test_roots: []\n"
+        "  build_roots: []\n",
+        encoding="utf-8",
+    )
+    profile = load_profile(root)
+    index_build(root)
+    codrax_evidence = CodraxEvidence(
+        enabled=True,
+        available=True,
+        status="ok",
+        file_line_refs=["src/target.cpp:2"],
+    )
+
+    hits = collect_evidence_hits(
+        root,
+        profile,
+        EvidenceQuery(target="src/target.cpp", symbols=["BACKEND_SYMBOL"], limit=10),
+        codrax_evidence=codrax_evidence,
+    )
+    codrax_hits = CodraxEvidenceBackend().collect_from_evidence(codrax_evidence)
+
+    assert all(isinstance(hit, EvidenceHit) for hit in hits)
+    assert {hit.backend for hit in hits} == {"local_index", "bulk_symbol_scan", "codrax"}
+    assert any(hit.kind == "file" and hit.path == "src/target.cpp" for hit in hits)
+    assert any(hit.kind == "symbol" and hit.symbol == "BACKEND_SYMBOL" and hit.line == 1 for hit in hits)
+    assert codrax_hits[0].backend == "codrax"
+    assert codrax_hits[0].path == "src/target.cpp"
+    assert codrax_hits[0].line == 2
+
+
+def test_search_backend_falls_back_to_local_index_when_zoekt_missing(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "search_project"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "target.cpp").write_text(
+        "void other() {}\nvoid call_SearchSymbol() { SearchSymbol(); }\n",
+        encoding="utf-8",
+    )
+    (root / "project_profile.yaml").write_text(
+        "project_name: search_project\n"
+        "paths:\n"
+        "  source_roots: [src]\n"
+        "  test_roots: []\n"
+        "  build_roots: []\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("gtestcov.search_backend.shutil.which", lambda _name: None)
+
+    doctor = search_doctor(root)
+    indexed = search_index(root)
+    result = search_query(root, "SearchSymbol", limit=5)
+
+    assert doctor["status"] == "ok"
+    assert doctor["integration_level"] == "optional_poc_fallback"
+    assert doctor["external_backend_required"] is False
+    assert doctor["zoekt"]["available"] is False
+    assert doctor["zoekt"]["integration_status"] == "optional_poc_unavailable"
+    assert doctor["fallback"]["available"] is True
+    assert indexed["status"] == "fallback_indexed"
+    assert indexed["integration_level"] == "optional_poc_fallback"
+    assert indexed["local_index"]["hit"] is True
+    assert result["status"] == "ok"
+    assert result["integration_level"] == "optional_poc_fallback"
+    assert result["backend"] == "local_index"
+    assert result["fallback_used"] is True
+    assert result["fallback_reason"] == "unavailable"
+    assert result["hits"]
+    assert EvidenceHit(**result["hits"][0]).backend == "local_index"
+    assert result["hits"][0]["kind"] == "text_search"
+    assert result["hits"][0]["path"] == "src/target.cpp"
+    assert result["hits"][0]["line"] == 2
+
+
+def test_search_cli_doctor_index_query_use_fallback(tmp_path: Path) -> None:
+    root = tmp_path / "search_cli"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "target.cpp").write_text("int CliSearchSymbol = 1;\n", encoding="utf-8")
+    (root / "project_profile.yaml").write_text(
+        "project_name: search_cli\n"
+        "paths:\n"
+        "  source_roots: [src]\n"
+        "  test_roots: []\n"
+        "  build_roots: []\n",
+        encoding="utf-8",
+    )
+    env = {**dict(subprocess.os.environ), "PYTHONPATH": str(REPO_ROOT / "src"), "PATH": ""}
+
+    doctor = subprocess.run(
+        [sys.executable, "-m", "gtestcov.cli", "search", "doctor", "--project-root", str(root)],
+        cwd=REPO_ROOT,
+        env=env,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    indexed = subprocess.run(
+        [sys.executable, "-m", "gtestcov.cli", "search", "index", "--project-root", str(root)],
+        cwd=REPO_ROOT,
+        env=env,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    query = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "gtestcov.cli",
+            "search",
+            "query",
+            "--project-root",
+            str(root),
+            "--query",
+            "CliSearchSymbol",
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    assert doctor.returncode == 0, doctor.stderr
+    assert indexed.returncode == 0, indexed.stderr
+    assert query.returncode == 0, query.stderr
+    doctor_data = json.loads(doctor.stdout)
+    indexed_data = json.loads(indexed.stdout)
+    query_data = json.loads(query.stdout)
+    assert doctor_data["integration_level"] == "optional_poc_fallback"
+    assert doctor_data["external_backend_required"] is False
+    assert doctor_data["zoekt"]["available"] is False
+    assert any("optional PoC" in note for note in doctor_data["notes"])
+    assert indexed_data["integration_level"] == "optional_poc_fallback"
+    assert indexed_data["status"] == "fallback_indexed"
+    assert query_data["integration_level"] == "optional_poc_fallback"
+    assert query_data["backend"] == "local_index"
+    assert query_data["hits"][0]["path"] == "src/target.cpp"
+
+
+def test_semantic_backend_falls_back_without_compile_commands(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "semantic_project"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "target.cpp").write_text(
+        "struct SemanticType {};\n"
+        "void SemanticSymbol() {}\n"
+        "void caller() { SemanticSymbol(); }\n",
+        encoding="utf-8",
+    )
+    (root / "project_profile.yaml").write_text(
+        "project_name: semantic_project\n"
+        "paths:\n"
+        "  source_roots: [src]\n"
+        "  test_roots: []\n"
+        "  build_roots: [build]\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("gtestcov.semantic_backend.shutil.which", lambda _name: None)
+
+    doctor = semantic_doctor(root)
+    refs = semantic_references(root, "SemanticSymbol", limit=5)
+    overview = semantic_overview(root, "src/target.cpp", limit=5)
+
+    assert doctor["status"] == "ok"
+    assert doctor["integration_level"] == "optional_poc_fallback"
+    assert doctor["external_backend_required"] is False
+    assert doctor["external_backend_invoked"] is False
+    assert doctor["compile_commands"]["available"] is False
+    assert doctor["selected_backend"]["available"] is False
+    assert doctor["fallback"]["references_backend"] == "bulk_symbol_scan"
+    assert refs["status"] == "ok"
+    assert refs["integration_level"] == "optional_poc_fallback"
+    assert refs["external_backend_invoked"] is False
+    assert refs["fallback_used"] is True
+    assert refs["semantic_backend_status"] == "compile_commands_missing"
+    assert any(hit["backend"] == "bulk_symbol_scan" and hit["symbol"] == "SemanticSymbol" for hit in refs["hits"])
+    assert overview["status"] == "ok"
+    assert overview["integration_level"] == "optional_poc_fallback"
+    assert overview["external_backend_invoked"] is False
+    assert overview["fallback_used"] is True
+    assert overview["semantic_backend_status"] == "compile_commands_missing"
+    assert any(EvidenceHit(**hit).backend == "local_semantic_overview" for hit in overview["hits"])
+    assert any(hit["symbol"] == "SemanticType" for hit in overview["hits"])
+
+
+def test_semantic_cli_doctor_references_overview_use_fallback(tmp_path: Path) -> None:
+    root = tmp_path / "semantic_cli"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "target.cpp").write_text(
+        "class CliSemanticType {};\n"
+        "int CliSemanticSymbol() { return 1; }\n",
+        encoding="utf-8",
+    )
+    (root / "project_profile.yaml").write_text(
+        "project_name: semantic_cli\n"
+        "paths:\n"
+        "  source_roots: [src]\n"
+        "  test_roots: []\n"
+        "  build_roots: []\n",
+        encoding="utf-8",
+    )
+    env = {**dict(subprocess.os.environ), "PYTHONPATH": str(REPO_ROOT / "src"), "PATH": ""}
+
+    doctor = subprocess.run(
+        [sys.executable, "-m", "gtestcov.cli", "semantic", "doctor", "--project-root", str(root)],
+        cwd=REPO_ROOT,
+        env=env,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    refs = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "gtestcov.cli",
+            "semantic",
+            "references",
+            "--project-root",
+            str(root),
+            "--symbol",
+            "CliSemanticSymbol",
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    overview = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "gtestcov.cli",
+            "semantic",
+            "overview",
+            "--project-root",
+            str(root),
+            "--target",
+            "src/target.cpp",
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    assert doctor.returncode == 0, doctor.stderr
+    assert refs.returncode == 0, refs.stderr
+    assert overview.returncode == 0, overview.stderr
+    doctor_data = json.loads(doctor.stdout)
+    refs_data = json.loads(refs.stdout)
+    overview_data = json.loads(overview.stdout)
+    assert doctor_data["integration_level"] == "optional_poc_fallback"
+    assert doctor_data["external_backend_required"] is False
+    assert doctor_data["external_backend_invoked"] is False
+    assert any("optional PoC" in note for note in doctor_data["notes"])
+    assert doctor_data["compile_commands"]["available"] is False
+    assert refs_data["integration_level"] == "optional_poc_fallback"
+    assert refs_data["external_backend_invoked"] is False
+    assert refs_data["hits"][0]["symbol"] == "CliSemanticSymbol"
+    assert refs_data["hits"][0]["backend"] == "bulk_symbol_scan"
+    assert overview_data["integration_level"] == "optional_poc_fallback"
+    assert overview_data["external_backend_invoked"] is False
+    assert any(hit["symbol"] == "CliSemanticType" for hit in overview_data["hits"])
+
+
+def test_analyzer_symbol_context_uses_profile_scan_scope(tmp_path: Path) -> None:
+    root = tmp_path / "scoped_analyze"
+    (root / "src").mkdir(parents=True)
+    (root / "third_party").mkdir()
+    (root / "src" / "visible.cpp").write_text("int visible = 0;\n", encoding="utf-8")
+    (root / "third_party" / "excluded.cpp").write_text("int ExcludedSymbol = 1;\n", encoding="utf-8")
+    (root / "project_profile.yaml").write_text(
+        "project_name: scoped_analyze\n"
+        "paths:\n"
+        "  source_roots: [src]\n"
+        "  test_roots: []\n"
+        "  build_roots: []\n"
+        "  exclude_dirs: [third_party]\n",
+        encoding="utf-8",
+    )
+    profile = load_profile(root)
+
+    features = inspect_target(root, "ExcludedSymbol", profile)
+
+    assert features.resolved_path == ""
+    assert features.dependency_symbols == []
 
 
 def test_discovery_does_not_embed_project_specific_build_detection(tmp_path: Path) -> None:
@@ -444,6 +1030,41 @@ def test_dependency_xml_and_symbol_classification(tmp_path: Path) -> None:
     assert "fake/shim at external boundary" in symbol.recommendation
 
 
+def test_classify_symbols_bulk_reads_each_cpp_file_once(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "bulk_symbols"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "symbols.hpp").write_text(
+        "\n".join([f"extern void SYMBOL_{index}();" for index in range(25)]) + "\n",
+        encoding="utf-8",
+    )
+    (root / "src" / "other.cpp").write_text("int unrelated = 0;\n", encoding="utf-8")
+    (root / "project_profile.yaml").write_text(
+        "project_name: bulk_symbols\n"
+        "paths:\n"
+        "  source_roots: [src]\n"
+        "  test_roots: []\n"
+        "  build_roots: []\n",
+        encoding="utf-8",
+    )
+    profile = load_profile(root)
+    read_counts: dict[str, int] = {}
+    original_read_text = dependency_module.read_text
+
+    def counting_read_text(path: Path) -> str:
+        rel = path.relative_to(root).as_posix()
+        read_counts[rel] = read_counts.get(rel, 0) + 1
+        return original_read_text(path)
+
+    monkeypatch.setattr(dependency_module, "read_text", counting_read_text)
+
+    reports = classify_symbols_bulk(root, [f"SYMBOL_{index}" for index in range(25)], profile)
+
+    assert len(reports) == 25
+    assert all(report.kind == "extern function" for report in reports)
+    assert all(any("src/symbols.hpp" in location for location in report.locations) for report in reports)
+    assert read_counts == {"src/other.cpp": 1, "src/symbols.hpp": 1}
+
+
 def test_analysis_classifies_codec_and_service(tmp_path: Path) -> None:
     root = copy_mini_repo(tmp_path)
 
@@ -580,6 +1201,7 @@ def test_codrax_check_and_evidence_cli_with_fake_command(tmp_path: Path) -> None
             "-m",
             "gtestcov.cli",
             "codrax-check",
+            "--deep",
             "--project-root",
             str(root),
             "--run-id",
@@ -609,11 +1231,267 @@ def test_codrax_check_and_evidence_cli_with_fake_command(tmp_path: Path) -> None
     assert evidence_status["codrax_status"] == "ok"
     assert cli_check.returncode == 0
     cli_check_data = json.loads(cli_check.stdout)
+    assert cli_check_data["mode"] == "deep"
     assert cli_check_data["status"] == "ok"
     assert cli_check_data["run_id"] == "codrax-check-cli"
     assert (cli_run_dir / "codrax_check.json").exists()
     assert (cli_run_dir / "gtestcov_status.json").exists()
     assert (cli_run_dir / "codrax_final_outputs" / "index.json").exists()
+
+
+def test_detached_evidence_start_status_collect_cli(tmp_path: Path) -> None:
+    root = copy_mini_repo(tmp_path)
+    command = write_fake_codrax(
+        tmp_path,
+        """
+- [target_behavior] src/energy_service.cpp:12 handles Init and Shutdown.
+- [test_surfaces] tests/energy_service_component_test.cpp:20 has an existing component test.
+""",
+    )
+    enable_codrax(root, command)
+    env = {**dict(subprocess.os.environ), "PYTHONPATH": str(REPO_ROOT / "src")}
+
+    start = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "gtestcov.cli",
+            "evidence",
+            "start",
+            "--project-root",
+            str(root),
+            "--target",
+            "src/energy_service.cpp",
+            "--run-id",
+            "detached-cli",
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    assert start.returncode == 0, start.stderr
+    start_data = json.loads(start.stdout)
+    assert start_data["status"] == "started"
+    assert start_data["run_id"] == "detached-cli"
+    assert Path(start_data["status_path"]).exists()
+
+    polled = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "gtestcov.cli",
+            "evidence",
+            "status",
+            "--project-root",
+            str(root),
+            "--run-id",
+            "detached-cli",
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    assert polled.returncode == 0, polled.stderr
+    assert json.loads(polled.stdout)["status"] in {"running", "done"}
+
+    collect_data = {}
+    for _ in range(30):
+        collect = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "gtestcov.cli",
+                "evidence",
+                "collect",
+                "--project-root",
+                str(root),
+                "--run-id",
+                "detached-cli",
+            ],
+            cwd=REPO_ROOT,
+            env=env,
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+        assert collect.returncode == 0, collect.stderr
+        collect_data = json.loads(collect.stdout)
+        if collect_data["status"] == "done":
+            break
+        time.sleep(0.2)
+
+    run_dir = root / ".gtestcov" / "runs" / "detached-cli"
+    assert collect_data["status"] == "done"
+    assert collect_data["understanding"]["codrax_evidence"]["status"] == "ok"
+    assert (run_dir / "detached_evidence_result.json").exists()
+    assert list((root / ".gtestcov" / "cache" / "evidence_pack").glob("*.json"))
+
+
+def test_detached_evidence_marks_dead_worker_failed(tmp_path: Path) -> None:
+    root = copy_mini_repo(tmp_path)
+    run_id, run_dir = ensure_run_dir(root, "detached-dead-worker")
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait(timeout=5)
+    meta = {
+        "status": "running",
+        "run_id": run_id,
+        "target": "src/energy_service.cpp",
+        "project_root": str(root),
+        "pid": proc.pid,
+        "updated_at": "2026-06-30T00:00:00+00:00",
+        "status_path": str(run_dir / "gtestcov_status.json"),
+        "result_path": str(run_dir / "detached_evidence_result.json"),
+        "stdout_path": str(run_dir / "detached_evidence.stdout.log"),
+        "stderr_path": str(run_dir / "detached_evidence.stderr.log"),
+    }
+    (run_dir / "detached_evidence.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+
+    status = evidence_status(root, run_id)
+    result = json.loads((run_dir / "detached_evidence_result.json").read_text(encoding="utf-8"))
+    collect = evidence_collect(root, run_id)
+
+    assert status["status"] == "failed"
+    assert status["process_alive"] is False
+    assert status["stale_reason"] == "pid_not_running"
+    assert result["status"] == "failed"
+    assert result["stale_reason"] == "pid_not_running"
+    assert "exited before writing result" in result["error"]
+    assert collect["status"] == "failed"
+
+
+def test_detached_evidence_marks_stale_metadata_failed(tmp_path: Path) -> None:
+    root = copy_mini_repo(tmp_path)
+    run_id, run_dir = ensure_run_dir(root, "detached-stale-metadata")
+    meta = {
+        "status": "running",
+        "run_id": run_id,
+        "target": "src/energy_service.cpp",
+        "project_root": str(root),
+        "updated_at": "2020-01-01T00:00:00+00:00",
+        "status_path": str(run_dir / "gtestcov_status.json"),
+        "result_path": str(run_dir / "detached_evidence_result.json"),
+    }
+    (run_dir / "detached_evidence.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+
+    status = evidence_status(root, run_id)
+    result = json.loads((run_dir / "detached_evidence_result.json").read_text(encoding="utf-8"))
+
+    assert status["status"] == "failed"
+    assert status["process_alive"] is None
+    assert status["stale_reason"] == "stale_metadata"
+    assert result["status"] == "failed"
+    assert result["stale_reason"] == "stale_metadata"
+
+
+def test_codrax_doctor_and_default_check_do_not_read_repository(tmp_path: Path) -> None:
+    root = copy_mini_repo(tmp_path)
+    log_path = tmp_path / "codrax_invocations.ndjson"
+    enable_codrax(root, write_fake_codrax_check_logger(tmp_path, log_path))
+    env = {**dict(subprocess.os.environ), "PYTHONPATH": str(REPO_ROOT / "src")}
+
+    doctor = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "gtestcov.cli",
+            "codrax",
+            "doctor",
+            "--project-root",
+            str(root),
+            "--run-id",
+            "codrax-doctor-cli",
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    default_check = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "gtestcov.cli",
+            "codrax-check",
+            "--project-root",
+            str(root),
+            "--run-id",
+            "codrax-default-cli",
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    doctor_data = json.loads(doctor.stdout)
+    default_data = json.loads(default_check.stdout)
+    invocations = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+
+    assert doctor.returncode == 0
+    assert default_check.returncode == 0
+    assert doctor_data["mode"] == "doctor"
+    assert default_data["mode"] == "doctor"
+    assert doctor_data["status"] == "ok"
+    assert default_data["status"] == "ok"
+    assert not (root / ".gtestcov" / "runs" / "codrax-doctor-cli" / "codrax_status.json").exists()
+    assert not (root / ".gtestcov" / "runs" / "codrax-default-cli" / "codrax_status.json").exists()
+    assert invocations
+    assert all("--repo" not in invocation for invocation in invocations)
+    assert all("--request" not in invocation for invocation in invocations)
+
+
+def test_codrax_check_quick_uses_explicit_target_and_build_file(tmp_path: Path) -> None:
+    root = copy_mini_repo(tmp_path)
+    log_path = tmp_path / "codrax_quick_invocations.ndjson"
+    enable_codrax(root, write_fake_codrax_check_logger(tmp_path, log_path))
+    env = {**dict(subprocess.os.environ), "PYTHONPATH": str(REPO_ROOT / "src")}
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "gtestcov.cli",
+            "codrax-check",
+            "--quick",
+            "--project-root",
+            str(root),
+            "--target",
+            "src/energy_service.cpp",
+            "--build-file",
+            "CMakeLists.txt",
+            "--run-id",
+            "codrax-quick-cli",
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    data = json.loads(completed.stdout)
+    invocations = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    repo_invocations = [invocation for invocation in invocations if "--repo" in invocation]
+    request = repo_invocations[-1][repo_invocations[-1].index("--request") + 1]
+
+    assert completed.returncode == 0
+    assert data["mode"] == "quick"
+    assert data["status"] == "ok"
+    assert data["target"] == "src/energy_service.cpp"
+    assert data["build_file"] == "CMakeLists.txt"
+    assert {item["relative_path"] for item in data["local_files"]} == {"src/energy_service.cpp", "CMakeLists.txt"}
+    assert "src/energy_service.cpp:12" in data["file_line_refs"]
+    assert "CMakeLists.txt:1" in data["file_line_refs"]
+    assert "quick citation probe" in request
+    assert "Only inspect these explicit files" in request
+    assert "src/energy_service.cpp" in request
+    assert "CMakeLists.txt" in request
 
 
 def test_codrax_auto_discovers_alternate_cli_protocol(tmp_path: Path) -> None:
@@ -726,6 +1604,102 @@ def test_codrax_long_running_with_activity_completes_and_records_outer_status(tm
     assert Path(index[-1]["final_log_path"]).exists()
 
 
+def test_codrax_silent_long_run_emits_own_heartbeat_and_progress_files(tmp_path: Path) -> None:
+    root = copy_mini_repo(tmp_path)
+    run_id = "codrax-silent-heartbeat"
+    command = write_fake_silent_codrax(tmp_path)
+    profile = load_profile(root)
+    profile.evidence.codrax.enabled = True
+    profile.evidence.codrax.command = command
+    profile.evidence.codrax.require_file_line = False
+    profile.evidence.codrax.idle_timeout_seconds = 5
+    profile.evidence.codrax.max_runtime_seconds = 10
+    profile.evidence.codrax.status_update_interval_seconds = 0.2
+    (root / "project_profile.yaml").write_text(profile_to_yaml(profile), encoding="utf-8")
+
+    env = {**dict(subprocess.os.environ), "PYTHONPATH": str(REPO_ROOT / "src")}
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "gtestcov.cli",
+            "evidence",
+            "--project-root",
+            str(root),
+            "--target",
+            "src/energy_service.cpp",
+            "--run-id",
+            run_id,
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    run_dir = root / ".gtestcov" / "runs" / run_id
+    run_status_path = run_dir / "gtestcov_status.json"
+    codrax_status_path = run_dir / "codrax_status.json"
+    events_path = run_dir / "gtestcov_events.ndjson"
+
+    running_status = None
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if events_path.exists() and run_status_path.exists():
+            events_text = events_path.read_text(encoding="utf-8")
+            if "codrax.heartbeat" in events_text:
+                status = json.loads(run_status_path.read_text(encoding="utf-8"))
+                if status.get("phase") == "codrax.heartbeat":
+                    running_status = status
+                    break
+        if proc.poll() is not None:
+            break
+        time.sleep(0.05)
+
+    stdout, stderr = proc.communicate(timeout=10)
+    events_text = events_path.read_text(encoding="utf-8") if events_path.exists() else ""
+
+    assert proc.returncode == 0, (stdout, stderr)
+    assert running_status is not None, (stdout, stderr, events_text)
+    assert "[gtestcov] CODRAX heartbeat" in stdout
+    assert f"run_id={run_id}" in stdout
+    assert "elapsed_seconds=" in stdout
+    assert "status_path=" in stdout
+    assert "last_activity_seconds_ago=" in stdout
+    assert running_status["codrax_status_path"] == str(codrax_status_path)
+    assert running_status["codrax_seconds_since_last_activity"] >= 0
+    assert "codrax.heartbeat" in events_text
+
+    final_run_status = json.loads(run_status_path.read_text(encoding="utf-8"))
+    final_codrax_status = json.loads(codrax_status_path.read_text(encoding="utf-8"))
+    assert final_run_status["phase"] == "evidence.done"
+    assert final_run_status["codrax_status"] == "ok"
+    assert final_codrax_status["status"] == "ok"
+    assert final_codrax_status["phase"] == "done"
+
+
+def test_codrax_idle_timeout_waits_while_native_log_grows(tmp_path: Path) -> None:
+    root = copy_mini_repo(tmp_path)
+    command = write_fake_native_log_growth_codrax(tmp_path)
+    profile = load_profile(root)
+    profile.evidence.codrax.enabled = True
+    profile.evidence.codrax.command = command
+    profile.evidence.codrax.idle_timeout_seconds = 1
+    profile.evidence.codrax.max_runtime_seconds = 10
+    profile.evidence.codrax.status_update_interval_seconds = 0.2
+    (root / "project_profile.yaml").write_text(profile_to_yaml(profile), encoding="utf-8")
+
+    evidence, _ = generate_codrax_evidence(root, "src/energy_service.cpp", run_id="codrax-native-growth")
+    run_dir = root / ".gtestcov" / "runs" / "codrax-native-growth"
+    events_text = (run_dir / "gtestcov_events.ndjson").read_text(encoding="utf-8")
+
+    assert evidence.status == "ok"
+    assert evidence.timeout_kind == ""
+    assert "src/energy_service.cpp:12" in evidence.file_line_refs
+    assert not (run_dir / "codrax_pre_terminate_snapshot.json").exists()
+    assert "codrax.timeout_warning" not in events_text
+
+
 def test_codrax_idle_timeout_uses_activity_not_fixed_request_timeout(tmp_path: Path) -> None:
     root = copy_mini_repo(tmp_path)
     command = write_fake_streaming_codrax(
@@ -746,7 +1720,22 @@ def test_codrax_idle_timeout_uses_activity_not_fixed_request_timeout(tmp_path: P
     assert "no output for 1 seconds" in " ".join(evidence.notes)
     assert Path(evidence.status_path).exists()
     assert Path(evidence.final_log_path).exists()
-    assert json.loads(Path(evidence.status_path).read_text(encoding="utf-8"))["status"] == "idle_timeout"
+    run_dir = root / ".gtestcov" / "runs" / "codrax-idle"
+    warning = run_dir / "codrax_timeout_warning.md"
+    snapshot = run_dir / "codrax_pre_terminate_snapshot.json"
+    status = json.loads(Path(evidence.status_path).read_text(encoding="utf-8"))
+    snapshot_data = json.loads(snapshot.read_text(encoding="utf-8"))
+    events_text = (run_dir / "gtestcov_events.ndjson").read_text(encoding="utf-8")
+    assert status["status"] == "idle_timeout"
+    assert status["timeout_warning_path"] == str(warning)
+    assert status["pre_terminate_snapshot_path"] == str(snapshot)
+    assert warning.exists()
+    assert snapshot.exists()
+    assert snapshot_data["reason"] == "idle"
+    assert snapshot_data["seconds_since_last_activity"] >= 1
+    assert "CODRAX Timeout Warning" in warning.read_text(encoding="utf-8")
+    assert "codrax.timeout_warning" in events_text
+    assert "codrax.pre_terminate_snapshot" in events_text
 
 
 def test_codrax_max_runtime_timeout_stops_chatty_process(tmp_path: Path) -> None:
@@ -770,10 +1759,22 @@ def test_codrax_max_runtime_timeout_stops_chatty_process(tmp_path: Path) -> None
     assert "max runtime of 1 seconds" in " ".join(evidence.notes)
     assert Path(evidence.status_path).exists()
     assert Path(evidence.final_log_path).exists()
-    assert json.loads(Path(evidence.status_path).read_text(encoding="utf-8"))["status"] == "max_runtime_timeout"
+    run_dir = root / ".gtestcov" / "runs" / "codrax-max"
+    warning = run_dir / "codrax_timeout_warning.md"
+    snapshot = run_dir / "codrax_pre_terminate_snapshot.json"
+    status = json.loads(Path(evidence.status_path).read_text(encoding="utf-8"))
+    snapshot_data = json.loads(snapshot.read_text(encoding="utf-8"))
+    assert status["status"] == "max_runtime_timeout"
+    assert status["timeout_warning_path"] == str(warning)
+    assert status["pre_terminate_snapshot_path"] == str(snapshot)
+    assert warning.exists()
+    assert snapshot.exists()
+    assert snapshot_data["reason"] == "max_runtime"
 
 
 def test_codrax_signal_termination_records_final_log(tmp_path: Path) -> None:
+    if sys.platform == "win32":
+        pytest.skip("Windows SIGTERM hard-terminates subprocesses and cannot exercise Python signal cleanup.")
     root = copy_mini_repo(tmp_path)
     enable_codrax(root, write_fake_long_running_codrax(tmp_path))
     env = {**dict(subprocess.os.environ), "PYTHONPATH": str(REPO_ROOT / "src")}
@@ -816,8 +1817,17 @@ def test_codrax_signal_termination_records_final_log(tmp_path: Path) -> None:
     assert status["status"] == "terminated_by_signal"
     assert status["phase"] == "interrupted"
     assert status["final_log_path"]
+    assert status["interrupted_md_path"]
+    assert status["interrupted_json_path"]
     final_log = Path(status["final_log_path"]).read_text(encoding="utf-8")
+    interrupted_md = Path(status["interrupted_md_path"]).read_text(encoding="utf-8")
+    interrupted_json = json.loads(Path(status["interrupted_json_path"]).read_text(encoding="utf-8"))
     assert "terminated_by_signal" in final_log
+    assert "Possible Causes" in interrupted_md
+    assert "Recovery" in interrupted_md
+    assert interrupted_json["status"] == "terminated_by_signal"
+    assert interrupted_json["signal"] == signal.SIGTERM
+    assert interrupted_json["recovery_suggestions"]
     index_path = root / ".gtestcov" / "runs" / "signal-stop" / "codrax_final_outputs" / "index.json"
     index = json.loads(index_path.read_text(encoding="utf-8"))
     assert index[-1]["status"] == "terminated_by_signal"
@@ -910,6 +1920,140 @@ def test_profile_sync_updates_profile_with_codrax_evidence(tmp_path: Path) -> No
     assert profile.targets.default_line_coverage == 82
     assert profile.evidence.codrax.direct_mode.enabled is True
     assert result["build_file_comparison"]["status"] == "matched"
+
+
+def test_evidence_pack_cache_hits_and_invalidates_for_analyze(tmp_path: Path) -> None:
+    root = copy_mini_repo(tmp_path)
+    log_path = tmp_path / "codrax_invocations.log"
+    command = write_counting_fake_codrax(
+        tmp_path,
+        log_path,
+        """
+- [target_behavior] src/energy_service.cpp:12 handles Init and service state.
+- [dependencies] external/emap/include/emap_memory.h:5 EMAP_MemFree is used.
+""",
+    )
+    enable_codrax(root, command)
+
+    first = analyze_target(root, "src/energy_service.cpp", run_id="cache-analyze-first")
+    second = analyze_target(root, "src/energy_service.cpp", run_id="cache-analyze-second")
+    second_status = json.loads((root / ".gtestcov" / "runs" / "cache-analyze-second" / "gtestcov_status.json").read_text(encoding="utf-8"))
+    packs = list((root / ".gtestcov" / "cache" / "evidence_pack").glob("*.json"))
+
+    assert len(log_path.read_text(encoding="utf-8").splitlines()) == 1
+    assert first.codrax_evidence.cache["stored"] is True
+    assert second.codrax_evidence.cache["hit"] is True
+    assert second_status["evidence_cache"]["hit"] is True
+    assert packs
+    pack = json.loads(packs[0].read_text(encoding="utf-8"))
+    assert pack["schema_version"] == 3
+    assert pack["metadata"]["operation"] == "project_understanding"
+    assert isinstance(pack["hits"], list)
+    assert "payload" not in pack
+    assert "codrax_evidence" not in pack
+    assert CODRAX_PAYLOAD in pack["payloads"]
+    assert "legacy_codrax" not in pack["payloads"]
+    assert "codrax_evidence" not in pack["payloads"]
+    assert second.codrax_evidence.cache["payload_name"] == CODRAX_PAYLOAD
+    assert CODRAX_PAYLOAD in second.codrax_evidence.cache["payload_names"]
+    assert "legacy_schema" not in second.codrax_evidence.cache
+    assert "checked_schema_versions" not in second.codrax_evidence.cache
+
+    profile_path = root / "project_profile.yaml"
+    profile_path.write_text(profile_path.read_text(encoding="utf-8") + "\n# cache bust profile comment\n", encoding="utf-8")
+    profile_changed = analyze_target(root, "src/energy_service.cpp", run_id="cache-analyze-profile-changed")
+    assert len(log_path.read_text(encoding="utf-8").splitlines()) == 2
+    assert profile_changed.codrax_evidence.cache["hit"] is False
+
+    (root / "src" / "new_index_file.cpp").write_text("int evidence_pack_index_change = 1;\n", encoding="utf-8")
+    index_changed = analyze_target(root, "src/energy_service.cpp", run_id="cache-analyze-index-changed")
+    assert len(log_path.read_text(encoding="utf-8").splitlines()) == 3
+    assert index_changed.codrax_evidence.cache["hit"] is False
+
+    target_path = root / "src" / "energy_service.cpp"
+    target_path.write_text(target_path.read_text(encoding="utf-8") + "\n// evidence pack target change\n", encoding="utf-8")
+    target_changed = analyze_target(root, "src/energy_service.cpp", run_id="cache-analyze-target-changed")
+    assert len(log_path.read_text(encoding="utf-8").splitlines()) == 4
+    assert target_changed.codrax_evidence.cache["hit"] is False
+
+
+def test_evidence_pack_rejects_old_or_incomplete_cache_formats(tmp_path: Path) -> None:
+    root = copy_mini_repo(tmp_path)
+    request_key = "old cache request"
+    evidence = CodraxEvidence(
+        enabled=True,
+        available=True,
+        status="ok",
+        command="codrax",
+        stdout_excerpt="- [target_behavior] src/energy_service.cpp:12 old cache should miss",
+        file_line_refs=["src/energy_service.cpp:12"],
+        symbols=["OldCacheSymbol"],
+    )
+    cache_key, path, fingerprints = _cache_identity(
+        root,
+        "src/energy_service.cpp",
+        "project_understanding",
+        request_key=request_key,
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    def base_pack() -> dict[str, object]:
+        return {
+            "schema_version": EVIDENCE_PACK_SCHEMA_VERSION,
+            "cache_key": cache_key,
+            "created_at": "2026-06-30T00:00:00+00:00",
+            "metadata": {
+                "operation": "project_understanding",
+                "target": "src/energy_service.cpp",
+                "request_key_hash": "old-request-hash",
+                "fingerprints": fingerprints,
+            },
+            "operation": "project_understanding",
+            "target": "src/energy_service.cpp",
+            "request_key_hash": "old-request-hash",
+            "fingerprints": fingerprints,
+            "sources": {"configured": ["codrax"], "hit_backends": ["codrax"]},
+            "hits": [],
+            "payloads": {},
+        }
+
+    def write_pack(pack: dict[str, object]) -> dict[str, object]:
+        path.write_text(json.dumps(pack, indent=2), encoding="utf-8")
+        loaded, meta = load_codrax_payload(
+            root,
+            "src/energy_service.cpp",
+            "project_understanding",
+            request_key=request_key,
+        )
+        assert loaded is None
+        assert meta["hit"] is False
+        return meta
+
+    missing_schema_pack = base_pack()
+    missing_schema_pack.pop("schema_version")
+    missing_schema_meta = write_pack(missing_schema_pack)
+    assert missing_schema_meta["miss_reason"] == "unsupported_evidence_pack_schema"
+    assert missing_schema_meta["expected_schema_version"] == EVIDENCE_PACK_SCHEMA_VERSION
+    assert missing_schema_meta["actual_schema_version"] is None
+
+    old_schema_pack = base_pack()
+    old_schema_pack["schema_version"] = 2
+    old_schema_meta = write_pack(old_schema_pack)
+    assert old_schema_meta["miss_reason"] == "unsupported_evidence_pack_schema"
+    assert old_schema_meta["expected_schema_version"] == EVIDENCE_PACK_SCHEMA_VERSION
+    assert old_schema_meta["actual_schema_version"] == 2
+
+    old_payload_pack = base_pack()
+    old_payload_pack["payload"] = {"codrax_evidence": evidence.model_dump(mode="json")}
+    old_payload_meta = write_pack(old_payload_pack)
+    assert old_payload_meta["miss_reason"] == "payload_missing"
+    assert old_payload_meta["payload_name"] == CODRAX_PAYLOAD
+
+    top_level_payload_pack = base_pack()
+    top_level_payload_pack["codrax_evidence"] = evidence.model_dump(mode="json")
+    top_level_payload_meta = write_pack(top_level_payload_pack)
+    assert top_level_payload_meta["miss_reason"] == "payload_missing"
+    assert top_level_payload_meta["payload_name"] == CODRAX_PAYLOAD
 
 
 def test_profile_sync_stops_when_user_build_file_conflicts_with_codrax(tmp_path: Path) -> None:
@@ -1128,6 +2272,39 @@ def test_cover_builds_single_file_task_with_coverage_goal(tmp_path: Path) -> Non
     assert json.loads(cli_status.stdout)["gtestcov_status"]["phase"] == "cover.task_ready"
 
 
+def test_cover_reuses_evidence_pack_on_second_same_target_run(tmp_path: Path) -> None:
+    root = copy_mini_repo(tmp_path)
+    log_path = tmp_path / "cover_codrax_invocations.log"
+    command = write_counting_fake_codrax(
+        tmp_path,
+        log_path,
+        """
+- build.build_file: CMakeLists.txt # CMakeLists.txt:1
+- build.candidate_build_files: CMakeLists.txt # CMakeLists.txt:1
+- build.filtered_test_command: ctest --test-dir build -R EnergyService # CMakeLists.txt:1
+- build.target_coverage_command: gcovr -r . --filter src/energy_service.cpp --xml -o coverage.xml # CMakeLists.txt:1
+- test_support.test_dirs: tests # tests/energy_service_component_test.cpp:1
+- test_support.test_build_config_paths: CMakeLists.txt # CMakeLists.txt:1
+- [target_behavior] src/energy_service.cpp:12 handles Init and service state.
+""",
+    )
+    enable_codrax(root, command)
+
+    first = cover_target(root, "src/energy_service.cpp", line_coverage=88, run_id="cover-cache-first", build_file="CMakeLists.txt")
+    assert first["status"] == "task_ready"
+    assert len(log_path.read_text(encoding="utf-8").splitlines()) == 2
+
+    second = cover_target(root, "src/energy_service.cpp", line_coverage=88, run_id="cover-cache-second", build_file="CMakeLists.txt")
+    status = json.loads((root / ".gtestcov" / "runs" / "cover-cache-second" / "gtestcov_status.json").read_text(encoding="utf-8"))
+
+    assert second["status"] == "task_ready"
+    assert len(log_path.read_text(encoding="utf-8").splitlines()) == 2
+    assert second["profile_sync"]["evidence_cache"]["hit"] is True
+    assert second["analysis"]["codrax_evidence"]["cache"]["hit"] is True
+    assert status["profile_sync_cache"]["hit"] is True
+    assert status["analysis_cache"]["hit"] is True
+
+
 def test_task_allowed_paths_include_codrax_cited_test_dirs_from_project_understanding() -> None:
     profile = load_profile(Path("__missing_project_profile__"))
     evidence = CodraxEvidence(
@@ -1265,6 +2442,11 @@ evidence:
     assert verify["commands"]["build"]["stdout"].strip() == "incremental build"
     assert verify["commands"]["test"]["stdout"].strip() == "filtered test"
     assert verify["commands"]["coverage"]["stdout"].strip() == "target coverage"
+    commands_dir = run_dir / "commands"
+    assert (commands_dir / "build.stdout.tail.log").read_text(encoding="utf-8").strip() == "incremental build"
+    assert (commands_dir / "test.stdout.tail.log").read_text(encoding="utf-8").strip() == "filtered test"
+    assert (commands_dir / "coverage.stdout.tail.log").read_text(encoding="utf-8").strip() == "target coverage"
+    assert verify["commands"]["build"]["stdout_tail_path"].endswith("build.stdout.tail.log")
     assert verify["coverage"]["line_rate_percent"] == 85.0
     assert verify["coverage"]["meets_threshold"] is True
     assert verify["passed"] is True
@@ -1298,13 +2480,24 @@ def test_verify_command_timeout_is_reported_and_cli_override_works(tmp_path: Pat
     )
 
     verify = json.loads(cli.stdout)
-    verify_json = json.loads((root / ".gtestcov" / "runs" / "cli-timeout" / "verify.json").read_text(encoding="utf-8"))
+    run_dir = root / ".gtestcov" / "runs" / "cli-timeout"
+    verify_json = json.loads((run_dir / "verify.json").read_text(encoding="utf-8"))
+    events = [json.loads(line)["phase"] for line in (run_dir / "gtestcov_events.ndjson").read_text(encoding="utf-8").splitlines() if line.strip()]
+    commands_dir = run_dir / "commands"
     assert cli.returncode == 0
     assert verify["commands"]["build"]["timeout"] is True
     assert verify["commands"]["build"]["returncode"] == 124
     assert verify["commands"]["build"]["timeout_seconds"] == 1
     assert "timed out after 1 seconds" in verify["commands"]["build"]["diagnostics"][0]
+    assert verify["commands"]["build"]["process_cleanup"]["process_tree_guaranteed"] is False
+    assert "subprocess.kill()" in verify["commands"]["build"]["process_cleanup"]["warning"]
     assert "build started" in verify["commands"]["build"]["stdout"]
+    assert "build started" in (commands_dir / "build.stdout.tail.log").read_text(encoding="utf-8")
+    assert Path(verify["commands"]["build"]["timeout_artifacts"]["json"]).exists()
+    assert Path(verify["commands"]["build"]["timeout_artifacts"]["markdown"]).exists()
+    timeout_artifact = json.loads(Path(verify["commands"]["build"]["timeout_artifacts"]["json"]).read_text(encoding="utf-8"))
+    assert timeout_artifact["process_cleanup"]["process_tree_guaranteed"] is False
+    assert "verify.build.heartbeat" in events
     assert verify_json["commands"]["build"]["timeout"] is True
     assert verify["passed"] is False
 
@@ -2005,7 +3198,7 @@ def test_version_and_install_doctor_report_environment(tmp_path: Path) -> None:
     info = get_version_info(REPO_ROOT)
     doctor = install_doctor(project_root=project, tool_root=REPO_ROOT, tool_home=tmp_path / "tool_home")
 
-    assert info.version == "0.2.1"
+    assert info.version == "0.3.0"
     assert info.version_source == "pyproject.toml"
     assert info.memory_schema_version >= 1
     assert isinstance(info.git_dirty, bool)
@@ -2089,7 +3282,7 @@ def test_zip_upgrade_inspect_apply_restore_and_rollback(tmp_path: Path) -> None:
     inspected = upgrade_inspect(
         tool_root=old_tool,
         project_root=project,
-        target_ref="v0.2.1",
+        target_ref="v0.3.0",
         install_mode="zip",
         upgrade_id="up-test",
         tool_home=tool_home,
@@ -2151,7 +3344,7 @@ def test_upgrade_apply_blocks_invalid_memory_migration(tmp_path: Path) -> None:
     upgrade_inspect(
         tool_root=old_tool,
         project_root=project,
-        target_ref="v0.2.1",
+        target_ref="v0.3.0",
         install_mode="zip",
         upgrade_id="bad-memory",
         tool_home=tool_home,
@@ -2180,8 +3373,8 @@ def test_upgrade_apply_refreshes_reused_venv_when_provided(tmp_path: Path) -> No
     (project / "project_profile.yaml").write_text("project_name: venv_refresh\n", encoding="utf-8")
     tool_home = tmp_path / "tool_home"
     log_path = tmp_path / "pip_args.json"
-    fake_python = tmp_path / "fake_python"
-    fake_python.write_text(
+    fake_python_runner = tmp_path / "fake_python_runner.py"
+    fake_python_runner.write_text(
         "#!/usr/bin/env python3\n"
         "import json\n"
         "import pathlib\n"
@@ -2189,12 +3382,19 @@ def test_upgrade_apply_refreshes_reused_venv_when_provided(tmp_path: Path) -> No
         f"pathlib.Path({str(log_path)!r}).write_text(json.dumps(sys.argv), encoding='utf-8')\n",
         encoding="utf-8",
     )
-    fake_python.chmod(0o755)
+    fake_python_runner.chmod(0o755)
+    if sys.platform == "win32":
+        fake_python = tmp_path / "fake_python.cmd"
+        fake_python.write_text(f'@echo off\n"{sys.executable}" "{fake_python_runner}" %*\n', encoding="utf-8")
+    else:
+        fake_python = tmp_path / "fake_python"
+        shutil.copy2(fake_python_runner, fake_python)
+        fake_python.chmod(0o755)
 
     upgrade_inspect(
         tool_root=old_tool,
         project_root=project,
-        target_ref="v0.2.1",
+        target_ref="v0.3.0",
         install_mode="zip",
         upgrade_id="venv-refresh",
         tool_home=tool_home,
@@ -2237,7 +3437,7 @@ def test_upgrade_cli_refuses_apply_without_approval(tmp_path: Path) -> None:
             "--project-root",
             str(project),
             "--target-ref",
-            "v0.2.1",
+            "v0.3.0",
             "--install-mode",
             "zip",
             "--upgrade-id",
