@@ -1,6 +1,24 @@
 # gtestcov Workflow
 
-这份文档对应 `gtestcov_workflow.drawio`。图已经按当前项目状态重写为更舒展的 6 段泳道：一次性接入、证据同步、任务生成、弱 AI 执行、门禁验证、覆盖率补洞闭环。
+Round 02 note: the lightweight environment check is `gtestcov codrax doctor`.
+A bare `gtestcov codrax-check` is a compatibility alias for that doctor-style
+check. `gtestcov codrax-check --quick` validates explicit target/build-file
+inputs, and `gtestcov codrax-check --deep` is the only deep repository citation
+probe. The workflow should not imply that `codrax-check` defaults to deep
+analysis.
+
+Evidence is collected in layers: local file index, bulk symbol scan, optional
+search backend, optional semantic backend, and CODRAX where configured. Zoekt,
+Serena, clangd, and ccls remain optional PoC/fallback paths; they are not
+required for the default workflow. CODRAX consumes scoped evidence for synthesis
+and deeper judgment rather than acting as the only search or understanding
+engine.
+
+This Markdown workflow is the authoritative current workflow description.
+`gtestcov_workflow.drawio` is the editable diagram source. The release package
+does not include a rendered PNG workflow image.
+
+这份文档对应 `gtestcov_workflow.drawio`。当前流程是 6 段泳道：一次性接入、证据同步、任务生成、弱 AI 执行、门禁验证、覆盖率补洞闭环。
 
 ```mermaid
 flowchart LR
@@ -8,7 +26,7 @@ flowchart LR
   B --> C["OpenCode /gtest-cover 调用 gtestcov MCP"]
 
   C --> D["用户输入 target、coverage goal、build-file anchor"]
-  D --> E["codrax-check"]
+  D --> E["codrax doctor / codrax-check --quick"]
   E --> F["profile-sync：用 CODRAX file:line 更新 project_profile.yaml"]
   F --> G{"证据可信并匹配 build-file anchor？"}
   G -->|"否"| H["manual_review_needed.md：停止，不猜测项目事实"]

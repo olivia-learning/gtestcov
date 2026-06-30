@@ -23,6 +23,12 @@ Recommended defaults:
 - Use native Linux when available. On Windows, WSL is supported; keep large C++
   projects under Linux paths such as `~/work/<project>`.
 
+Release zip note: `Out_of_the_box_ready/gtestcov-v0.4.0.zip` is the current
+local ready-to-use release-preparation package. `gtestcov-v0.3.0.zip` is kept
+only as a historical release artifact. For any later release, rebuild the
+ready-to-use package from the final code and docs, and make sure the zip
+version and manifest match `pyproject.toml`.
+
 One-shot prompt:
 
 ```text
@@ -36,7 +42,7 @@ Requirements:
 1. Do not modify system network, drivers, registry, WSL installation, Hyper-V, or services.
 2. If the target directory is not empty, stop and report before changing it.
 3. Reuse an existing gtestcov virtual environment when one exists.
-4. After installation, run gtestcov version, gtestcov install doctor, gtestcov init, and gtestcov codrax-check.
+4. After installation, run `gtestcov version`, `gtestcov install doctor`, `gtestcov codrax doctor`, and `gtestcov init`; pass `--source-root`, `--test-root`, `--build-root`, and `--build-file` when those inputs are known. Run `gtestcov index build` and `gtestcov index status` after scan roots are known. Use `gtestcov codrax-check --quick` only when target/build-file inputs are known.
 5. Write <project-root>/.gtestcov/install_report.md.
 ```
 
@@ -108,8 +114,14 @@ python -m pip install -U pip
 python -m pip install -e .[dev]
 gtestcov version
 gtestcov install doctor --project-root <cpp-project-root>
-gtestcov init --project-root <cpp-project-root>
-gtestcov codrax-check --project-root <cpp-project-root>
+gtestcov codrax doctor --project-root <cpp-project-root>
+gtestcov init --project-root <cpp-project-root> --source-root <source-root> --test-root <test-root> --build-root <build-root> --build-file <build-file>
+gtestcov index build --project-root <cpp-project-root>
+gtestcov index status --project-root <cpp-project-root>
+# If scan roots or build-file inputs are not known yet, use:
+# gtestcov init --project-root <cpp-project-root>
+# Optional once target/build-file inputs are known:
+gtestcov codrax-check --quick --project-root <cpp-project-root> --target <target-file> --build-file <build-file>
 ```
 
 Zip mode:
@@ -125,17 +137,38 @@ python -m pip install -U pip
 python -m pip install -e .
 gtestcov version
 gtestcov install doctor --project-root <cpp-project-root>
-gtestcov init --project-root <cpp-project-root>
-gtestcov codrax-check --project-root <cpp-project-root>
+gtestcov codrax doctor --project-root <cpp-project-root>
+gtestcov init --project-root <cpp-project-root> --source-root <source-root> --test-root <test-root> --build-root <build-root> --build-file <build-file>
+gtestcov index build --project-root <cpp-project-root>
+gtestcov index status --project-root <cpp-project-root>
+# If scan roots or build-file inputs are not known yet, use:
+# gtestcov init --project-root <cpp-project-root>
+# Optional once target/build-file inputs are known:
+gtestcov codrax-check --quick --project-root <cpp-project-root> --target <target-file> --build-file <build-file>
 ```
 
+Use a release zip whose version matches the behavior you want to install. The
+checked-in `Out_of_the_box_ready/gtestcov-v0.4.0.zip` is the current local
+ready-to-use release-preparation package; `gtestcov-v0.3.0.zip` remains a
+historical release artifact.
+
 CODRAX is installed separately by the user. After `gtestcov init`, run
-`gtestcov codrax-check --project-root <cpp-project-root>`. If CODRAX is missing
-or its CLI shape changed, report that result and do not guess.
+`gtestcov codrax doctor --project-root <cpp-project-root>` if CODRAX is
+configured. A bare `gtestcov codrax-check` is a compatibility entry point and is
+equivalent to the lightweight doctor check; it does not read the repository or
+require `file:line` evidence. Use `gtestcov codrax-check --quick` only when the
+target and build-file inputs are known. Use `gtestcov codrax-check --deep` only
+for explicit deep repository citation validation, because it may run for a long
+time. If CODRAX is missing or its CLI shape changed, report that result and do
+not guess.
 
 New `project_profile.yaml` files enable CODRAX by default. Do not silently turn
 it off for a real project; if CODRAX is unavailable, stop with the check result
 or write manual review material instead of letting the weak AI guess.
+
+Zoekt and semantic backends such as Serena, clangd, and ccls are optional
+PoC/fallback paths. They are not required for default installs and must not be
+treated as hard dependencies.
 
 After installation, write:
 
@@ -144,8 +177,9 @@ After installation, write:
 ```
 
 The report must include install mode, tool directory, project root, Python
-executable, `gtestcov version` summary, `install doctor` result, `codrax-check`
-result, failed commands, and the next suggested command.
+executable, `gtestcov version` summary, `install doctor` result, `codrax doctor`
+result, any explicit quick/deep `codrax-check` result, failed commands, and the
+next suggested command.
 
 ## Upgrade
 

@@ -40,7 +40,7 @@
         <mxCell id="n_112" value="用户输入目标&lt;br&gt;target file / symbol&lt;br&gt;line coverage / build-file anchor" style="rounded=1;arcSize=10;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#4C9AFF;fontColor=#172B4D;strokeWidth=2;fontSize=18;spacing=12;" vertex="1" parent="1">
           <mxGeometry x="170" y="575" width="360" height="100" as="geometry" />
         </mxCell>
-        <mxCell id="n_113" value="codrax-check&lt;br&gt;确认 CODRAX CLI 可用&lt;br&gt;必要时使用 args_template" style="rounded=1;arcSize=10;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#4C9AFF;fontColor=#172B4D;strokeWidth=2;fontSize=18;spacing=12;" vertex="1" parent="1">
+        <mxCell id="n_113" value="codrax doctor&lt;br&gt;轻量 CLI/protocol 检查&lt;br&gt;quick 仅验证明确文件" style="rounded=1;arcSize=10;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#4C9AFF;fontColor=#172B4D;strokeWidth=2;fontSize=18;spacing=12;" vertex="1" parent="1">
           <mxGeometry x="660" y="575" width="360" height="100" as="geometry" />
         </mxCell>
         <mxCell id="n_114" value="profile-sync&lt;br&gt;用 file:line 证据更新 profile&lt;br&gt;备份旧 profile" style="rounded=1;arcSize=10;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#4C9AFF;fontColor=#172B4D;strokeWidth=2;fontSize=18;spacing=12;" vertex="1" parent="1">

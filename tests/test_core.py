@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import signal
 import subprocess
@@ -24,7 +25,7 @@ from gtestcov.evidence_backend import CodraxEvidenceBackend, collect_evidence_hi
 from gtestcov.evidence_pack import CODRAX_PAYLOAD, EVIDENCE_PACK_SCHEMA_VERSION, _cache_identity, load_codrax_payload
 from gtestcov.evidence_types import EvidenceQuery, EvidenceHit
 from gtestcov.file_index import index_build
-from gtestcov.fs import ensure_run_dir
+from gtestcov.fs import ensure_run_dir, scan_files
 from gtestcov.memory import refresh_memory, show_memory
 from gtestcov.preflight import preflight_check
 from gtestcov.profile_sync import profile_sync
@@ -201,6 +202,217 @@ def write_fake_codrax_check_logger(tmp_path: Path, log_path: Path) -> str:
     return f'"{sys.executable}" "{script}"'
 
 
+def make_round06_mini_cpp_project(tmp_path: Path) -> Path:
+    root = tmp_path / "mini_cpp_project"
+    (root / "src").mkdir(parents=True)
+    (root / "tests").mkdir()
+    (root / "third_party").mkdir()
+    (root / "out").mkdir()
+    (root / ".repo" / "manifests").mkdir(parents=True)
+    (root / "vendor").mkdir()
+    (root / "prebuilts").mkdir()
+    (root / "src" / "target.h").write_text("#pragma once\nint add_one(int value);\n", encoding="utf-8")
+    (root / "src" / "target.cpp").write_text(
+        '#include "target.h"\n\n'
+        "int add_one(int value) {\n"
+        "    if (value < 0) {\n"
+        "        return 0;\n"
+        "    }\n"
+        "    return value + 1;\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    (root / "tests" / "test_target.cpp").write_text(
+        '#include "target.h"\n'
+        '#include "gtest/gtest.h"\n'
+        "TEST(Target, AddOne) { EXPECT_EQ(add_one(1), 2); }\n",
+        encoding="utf-8",
+    )
+    (root / "CMakeLists.txt").write_text(
+        "cmake_minimum_required(VERSION 3.20)\n"
+        "project(round06_mini_cpp_project)\n"
+        "add_library(target src/target.cpp)\n"
+        "add_executable(target_tests tests/test_target.cpp)\n",
+        encoding="utf-8",
+    )
+    for path in [
+        root / "third_party" / "ignored.cpp",
+        root / "out" / "generated.cpp",
+        root / ".repo" / "manifests" / "ignored.cpp",
+        root / "vendor" / "ignored.cpp",
+        root / "prebuilts" / "ignored.cpp",
+    ]:
+        path.write_text("int ignored = 1;\n", encoding="utf-8")
+    return root
+
+
+def write_round06_verify_scripts(root: Path) -> tuple[Path, Path, Path]:
+    build_script = root / "round06_build.py"
+    test_script = root / "round06_test.py"
+    coverage_script = root / "round06_coverage.py"
+    build_script.write_text(
+        "from pathlib import Path\n"
+        "Path('build_marker.txt').write_text('built', encoding='utf-8')\n"
+        "print('round06 build complete')\n",
+        encoding="utf-8",
+    )
+    test_script.write_text(
+        "from pathlib import Path\n"
+        "Path('test_marker.txt').write_text('tested', encoding='utf-8')\n"
+        "print('round06 test complete')\n",
+        encoding="utf-8",
+    )
+    coverage_script.write_text(
+        "from pathlib import Path\n"
+        "Path('coverage.xml').write_text("
+        "'<coverage><packages><package><classes><class filename=\"src/target.cpp\" line-rate=\"0.92\" /></classes></package></packages></coverage>', "
+        "encoding='utf-8')\n"
+        "print('round06 coverage complete')\n",
+        encoding="utf-8",
+    )
+    return build_script, test_script, coverage_script
+
+
+def round06_fake_codrax_output() -> str:
+    return """
+- build.build_file: CMakeLists.txt # CMakeLists.txt:1
+- build.candidate_build_files: CMakeLists.txt # CMakeLists.txt:1
+- build.build_command: python round06_build.py # CMakeLists.txt:3
+- build.incremental_build_command: python round06_build.py # CMakeLists.txt:3
+- build.test_command: python round06_test.py # CMakeLists.txt:4
+- build.filtered_test_command: python round06_test.py # CMakeLists.txt:4
+- build.coverage_command: python round06_coverage.py # CMakeLists.txt:4
+- build.target_coverage_command: python round06_coverage.py # CMakeLists.txt:4
+- test_support.test_dirs: tests # tests/test_target.cpp:1
+- test_support.test_build_config_paths: CMakeLists.txt # CMakeLists.txt:1
+- [target_behavior] src/target.cpp:3 add_one handles negative inputs and increments non-negative values.
+"""
+
+
+def run_gtestcov_json(args: list[str], project_root: Path | None = None) -> dict[str, object]:
+    env = {**dict(subprocess.os.environ), "PYTHONPATH": str(REPO_ROOT / "src")}
+    completed = subprocess.run(
+        [sys.executable, "-m", "gtestcov.cli", *args],
+        cwd=project_root or REPO_ROOT,
+        env=env,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "Traceback" not in completed.stderr
+    assert completed.stdout.strip()
+    return json.loads(completed.stdout)
+
+
+def test_init_cli_accepts_scan_roots_build_file_and_keeps_commands_empty(tmp_path: Path) -> None:
+    root = tmp_path / "init_project"
+    (root / "src").mkdir(parents=True)
+    (root / "components").mkdir()
+    (root / "tests").mkdir()
+    (root / "vendor").mkdir()
+    (root / "cmake-build-debug").mkdir()
+    (root / "src" / "main.cpp").write_text("int main_value = 1;\n", encoding="utf-8")
+    (root / "components" / "feature.cpp").write_text("int feature_value = 2;\n", encoding="utf-8")
+    (root / "tests" / "feature_test.cpp").write_text('#include "gtest/gtest.h"\nTEST(Feature, Works) {}\n', encoding="utf-8")
+    (root / "vendor" / "ignored.cpp").write_text("int ignored = 1;\n", encoding="utf-8")
+    (root / "cmake-build-debug" / "generated.cpp").write_text("int generated = 1;\n", encoding="utf-8")
+    (root / "CMakeLists.txt").write_text("add_library(feature components/feature.cpp)\n", encoding="utf-8")
+
+    init = run_gtestcov_json(
+        [
+            "init",
+            "--project-root",
+            str(root),
+            "--overwrite",
+            "--source-root",
+            "src",
+            "--source-root",
+            "components",
+            "--test-root",
+            "tests",
+            "--build-root",
+            ".",
+            "--build-file",
+            "CMakeLists.txt",
+            "--exclude-dir",
+            "vendor",
+            "--exclude-dir",
+            "cmake-build-debug",
+            "--max-files",
+            "20",
+            "--max-file-bytes",
+            "2048",
+        ]
+    )
+    profile = load_profile(root)
+    index = index_build(root)
+    indexed_files = set(json.loads((root / ".gtestcov" / "cache" / "file_index.json").read_text(encoding="utf-8"))["files"])
+
+    assert init["profile_updated"] is True
+    assert profile.paths.source_roots == ["src", "components"]
+    assert profile.paths.test_roots == ["tests"]
+    assert profile.paths.build_roots == ["."]
+    assert profile.paths.max_files == 20
+    assert profile.paths.max_file_bytes == 2048
+    assert profile.paths.exclude_dirs.count("vendor") == 1
+    assert profile.paths.exclude_dirs.count("cmake-build-debug") == 1
+    assert profile.build.build_file == "CMakeLists.txt"
+    assert profile.build.candidate_build_files == ["CMakeLists.txt"]
+    assert profile.build.build_command == ""
+    assert profile.build.incremental_build_command == ""
+    assert profile.build.test_command == ""
+    assert profile.build.filtered_test_command == ""
+    assert profile.build.coverage_command == ""
+    assert profile.build.target_coverage_command == ""
+    assert index["status"] == "built"
+    assert {"src/main.cpp", "components/feature.cpp", "tests/feature_test.cpp", "CMakeLists.txt"}.issubset(indexed_files)
+    assert not any(path.startswith(("vendor/", "cmake-build-debug/")) for path in indexed_files)
+
+
+def test_init_cli_accepts_old_project_root_only_usage(tmp_path: Path) -> None:
+    root = tmp_path / "old_init_project"
+
+    init = run_gtestcov_json(["init", "--project-root", str(root)])
+    profile = load_profile(root)
+
+    assert Path(str(init["profile"])).exists()
+    assert init["profile_updated"] is True
+    assert profile.paths.source_roots == ["src"]
+    assert profile.paths.test_roots == ["tests"]
+    assert profile.paths.build_roots == ["."]
+    assert profile.build.build_file == ""
+    assert profile.build.candidate_build_files == []
+
+
+def test_init_cli_rejects_paths_outside_project_root_without_partial_profile(tmp_path: Path) -> None:
+    env = {**dict(subprocess.os.environ), "PYTHONPATH": str(REPO_ROOT / "src")}
+    outside_build_file = tmp_path / "outside" / "CMakeLists.txt"
+    cases = [
+        ("source root", ["--source-root", ".."]),
+        ("test root", ["--test-root", ".."]),
+        ("build root", ["--build-root", ".."]),
+        ("build file", ["--build-file", str(outside_build_file)]),
+        ("exclude dir", ["--exclude-dir", ".."]),
+    ]
+
+    for index, (label, args) in enumerate(cases):
+        root = tmp_path / f"bad_init_project_{index}"
+        completed = subprocess.run(
+            [sys.executable, "-m", "gtestcov.cli", "init", "--project-root", str(root), *args],
+            cwd=REPO_ROOT,
+            env=env,
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+
+        assert completed.returncode != 0
+        assert "Traceback" not in completed.stderr
+        assert f"{label} must stay under project root" in completed.stderr
+        assert not (root / "project_profile.yaml").exists()
+
+
 def write_fake_long_running_codrax(tmp_path: Path) -> str:
     script = tmp_path / "fake_codrax_long.py"
     script.write_text(
@@ -354,9 +566,14 @@ def test_profile_and_discovery_on_mini_repo(tmp_path: Path) -> None:
 
 def test_default_profile_enables_codrax() -> None:
     profile = load_profile(Path("__missing_project_profile__"))
+    codrax_config = profile.model_dump(mode="json")["evidence"]["codrax"]
 
     assert profile.evidence.codrax.enabled is True
     assert profile.evidence.codrax.command == "codrax"
+    assert "timeout_seconds" not in codrax_config
+    assert "idle_timeout_seconds" in codrax_config
+    assert "max_runtime_seconds" in codrax_config
+    assert "probe_timeout_seconds" in codrax_config
     assert profile.paths.source_roots == ["src"]
     assert profile.paths.test_roots == ["tests"]
     assert profile.paths.build_roots == ["."]
@@ -374,6 +591,32 @@ def test_legacy_profile_gets_default_paths(tmp_path: Path) -> None:
     assert profile.paths.max_files == 8000
 
 
+def test_old_codrax_timeout_seconds_profile_field_is_ignored(tmp_path: Path) -> None:
+    root = tmp_path / "old_codrax_timeout_profile"
+    root.mkdir()
+    (root / "project_profile.yaml").write_text(
+        """
+project_name: old_codrax_timeout
+evidence:
+  codrax:
+    enabled: true
+    timeout_seconds: 180
+    idle_timeout_seconds: 9
+    max_runtime_seconds: 99
+    probe_timeout_seconds: 7
+""",
+        encoding="utf-8",
+    )
+
+    profile = load_profile(root)
+    codrax_config = profile.evidence.codrax.model_dump(mode="json")
+
+    assert "timeout_seconds" not in codrax_config
+    assert profile.evidence.codrax.idle_timeout_seconds == 9
+    assert profile.evidence.codrax.max_runtime_seconds == 99
+    assert profile.evidence.codrax.probe_timeout_seconds == 7
+
+
 def test_profile_rejects_configured_roots_outside_project(tmp_path: Path) -> None:
     root = tmp_path / "unsafe_profile"
     root.mkdir()
@@ -389,13 +632,22 @@ def test_profile_rejects_configured_roots_outside_project(tmp_path: Path) -> Non
         load_profile(root)
 
 
-def test_run_id_is_sanitized_and_stays_under_runs_dir(tmp_path: Path) -> None:
+def test_run_id_rejects_path_traversal_and_stays_under_runs_dir(tmp_path: Path) -> None:
     root = tmp_path / "project"
     root.mkdir()
 
-    run_id, run_dir = ensure_run_dir(root, "../bad/id with spaces")
+    with pytest.raises(ValueError, match="unsafe run_id"):
+        ensure_run_dir(root, "../../bad")
+    with pytest.raises(ValueError, match="unsafe run_id"):
+        ensure_run_dir(root, "C:\\bad")
+    with pytest.raises(ValueError, match="unsafe run_id"):
+        ensure_run_dir(root, "a/b")
+    with pytest.raises(ValueError, match="unsafe run_id"):
+        ensure_run_dir(root, "a\\b")
 
-    assert run_id == "bad_id_with_spaces"
+    run_id, run_dir = ensure_run_dir(root, "safe-run_01")
+
+    assert run_id == "safe-run_01"
     assert run_dir.parent == (root / ".gtestcov" / "runs").resolve()
     assert run_dir.exists()
     assert not (tmp_path / "bad").exists()
@@ -408,6 +660,17 @@ def test_target_path_cannot_escape_project_root(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="escapes project root"):
         analyze_target(root, "../outside.cpp", run_id="escape-target")
+
+
+def test_profile_sync_target_and_build_file_cannot_escape_project_root(tmp_path: Path) -> None:
+    root = copy_mini_repo(tmp_path)
+    outside = tmp_path / "outside.cmake"
+    outside.write_text("add_custom_target(outside)\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="escapes project root"):
+        profile_sync(root, "../outside.cpp", run_id="profile-sync-target-escape", build_file="CMakeLists.txt")
+    with pytest.raises(ValueError, match="escapes project root"):
+        profile_sync(root, "src/energy_service.cpp", run_id="profile-sync-build-escape", build_file="../outside.cmake")
 
 
 def test_discovery_uses_profile_scan_scope_and_excludes(tmp_path: Path) -> None:
@@ -435,6 +698,21 @@ def test_discovery_uses_profile_scan_scope_and_excludes(tmp_path: Path) -> None:
     assert discovery.test_files == ["tests/main_test.cpp"]
     assert "third_party/vendor_test.cpp" not in discovery.gtest_includes
     assert discovery.build_files == ["CMakeLists.txt"]
+
+
+def test_scan_files_default_excludes_large_workspace_dirs(tmp_path: Path) -> None:
+    root = tmp_path / "scan_defaults"
+    (root / "src").mkdir(parents=True, exist_ok=True)
+    for directory in ("third_party", "out", ".repo", "build", "vendor", "prebuilts"):
+        (root / directory).mkdir(parents=True, exist_ok=True)
+        (root / directory / f"{directory.replace('.', 'dot')}_ignored.cpp").write_text("int ignored = 0;\n", encoding="utf-8")
+    (root / "src" / "target.cpp").write_text("int target = 1;\n", encoding="utf-8")
+
+    scan = scan_files(root, {".cpp"})
+    rels = {path.relative_to(root).as_posix() for path in scan["files"]}
+
+    assert rels == {"src/target.cpp"}
+    assert scan["skipped_excluded"] >= 6
 
 
 def test_discovery_writes_scan_progress_and_truncation_artifact(tmp_path: Path) -> None:
@@ -533,6 +811,262 @@ def test_file_index_build_status_refresh_and_discovery_hit(tmp_path: Path) -> No
     assert progress["file_index"]["hit_reason"] == "index_present"
 
 
+def test_round06_e2e_dry_run_cli_index_cache_verify_and_profile_sync(tmp_path: Path) -> None:
+    root = make_round06_mini_cpp_project(tmp_path)
+
+    version_info = run_gtestcov_json(["version"])
+    install = run_gtestcov_json(["install", "doctor", "--project-root", str(root)])
+    doctor = run_gtestcov_json(["codrax", "doctor", "--project-root", str(root), "--run-id", "round06-doctor"])
+    init = run_gtestcov_json(["init", "--project-root", str(root)])
+    index_missing = run_gtestcov_json(["index", "status", "--project-root", str(root)])
+    index_built = run_gtestcov_json(["index", "build", "--project-root", str(root)])
+    index_ready = run_gtestcov_json(["index", "status", "--project-root", str(root)])
+    index_refresh = run_gtestcov_json(["index", "refresh", "--project-root", str(root)])
+    quick = run_gtestcov_json(
+        [
+            "codrax-check",
+            "--quick",
+            "--project-root",
+            str(root),
+            "--run-id",
+            "round06-quick-missing-codrax",
+            "--target",
+            "src/target.cpp",
+            "--build-file",
+            "CMakeLists.txt",
+        ]
+    )
+
+    assert "version" in version_info
+    assert install["status"] in {"ok", "warnings"}
+    assert doctor["mode"] == "doctor"
+    assert doctor["available"] is False
+    assert doctor["status"] == "command_not_found"
+    assert Path(str(init["profile"])).exists()
+    assert index_missing["status"] == "missing"
+    assert index_built["status"] == "built"
+    assert index_built["hit"] is True
+    assert index_ready["status"] == "ready"
+    assert index_ready["hit"] is True
+    assert index_refresh["status"] == "built"
+    assert quick["mode"] == "quick"
+    assert quick["status"] == "command_not_found"
+    assert quick["available"] is False
+    assert {item["relative_path"] for item in quick["local_files"]} == {"src/target.cpp", "CMakeLists.txt"}
+    assert not quick["local_errors"]
+
+    file_index = json.loads((root / ".gtestcov" / "cache" / "file_index.json").read_text(encoding="utf-8"))
+    indexed_files = set(file_index["files"])
+    assert "src/target.cpp" in indexed_files
+    assert "src/target.h" in indexed_files
+    assert "tests/test_target.cpp" in indexed_files
+    assert "CMakeLists.txt" in indexed_files
+    assert not any(path.startswith(("third_party/", "out/", ".repo/", "vendor/", "prebuilts/")) for path in indexed_files)
+
+    fake_codrax = write_fake_codrax(tmp_path, round06_fake_codrax_output())
+    profile = load_profile(root)
+    profile.evidence.codrax.enabled = True
+    profile.evidence.codrax.command = fake_codrax
+    profile.evidence.codrax.status_update_interval_seconds = 0.2
+    profile.evidence.codrax.idle_timeout_seconds = 2
+    (root / "project_profile.yaml").write_text(profile_to_yaml(profile), encoding="utf-8")
+
+    first_sync = profile_sync(root, "src/target.cpp", run_id="round06-sync", line_coverage=88, build_file="CMakeLists.txt")
+    second_sync = profile_sync(root, "src/target.cpp", run_id="round06-sync-second", line_coverage=88, build_file="CMakeLists.txt")
+    synced_profile = load_profile(root)
+    pack_path = Path(first_sync["codrax_evidence"]["cache"]["path"])
+    pack = json.loads(pack_path.read_text(encoding="utf-8"))
+    profile_evidence = Path(first_sync["profile_evidence_path"]).read_text(encoding="utf-8")
+
+    assert first_sync["status"] == "ok"
+    assert first_sync["evidence_cache"]["stored"] is True
+    assert second_sync["evidence_cache"]["hit"] is True
+    assert second_sync["codrax_evidence"]["cache"]["payload_name"] == CODRAX_PAYLOAD
+    assert second_sync["codrax_evidence"]["cache"]["payload_names"] == [CODRAX_PAYLOAD]
+    assert "legacy_schema" not in second_sync["codrax_evidence"]["cache"]
+    assert "checked_schema_versions" not in second_sync["codrax_evidence"]["cache"]
+    assert pack["schema_version"] == EVIDENCE_PACK_SCHEMA_VERSION
+    assert pack["metadata"]["operation"] == "profile_sync"
+    assert isinstance(pack["hits"], list)
+    assert CODRAX_PAYLOAD in pack["payloads"]
+    assert "legacy_codrax" not in pack["payloads"]
+    assert "payload" not in pack
+    assert "codrax_evidence" not in pack
+    assert first_sync["executable_command_candidates"]["build.build_command"]["review_status"] == "not_written_to_profile"
+    assert "Executable Command Candidates Requiring Review" in profile_evidence
+    assert synced_profile.build.build_command == ""
+    assert synced_profile.build.test_command == ""
+    assert synced_profile.build.coverage_command == ""
+    assert synced_profile.build.incremental_build_command == ""
+    assert synced_profile.build.filtered_test_command == ""
+    assert synced_profile.build.target_coverage_command == ""
+
+    build_script, test_script, coverage_script = write_round06_verify_scripts(root)
+    synced_profile.build.incremental_build_command = f'"{sys.executable}" "{build_script}"'
+    synced_profile.build.filtered_test_command = f'"{sys.executable}" "{test_script}"'
+    synced_profile.build.target_coverage_command = f'"{sys.executable}" "{coverage_script}"'
+    synced_profile.build.coverage_xml = "coverage.xml"
+    synced_profile.evidence.codrax.enabled = False
+    (root / "project_profile.yaml").write_text(profile_to_yaml(synced_profile), encoding="utf-8")
+    fresh_run = root / ".gtestcov" / "runs" / "round06-verify"
+    fresh_run.mkdir(parents=True, exist_ok=True)
+    write_coverage_goal(fresh_run, "src/target.cpp", 80)
+
+    verify = run_gtestcov_json(["verify", "--project-root", str(root), "--run-id", "round06-verify"])
+    verify_json = json.loads((fresh_run / "verify.json").read_text(encoding="utf-8"))
+    checklist = (fresh_run / "review_checklist.md").read_text(encoding="utf-8")
+    commands_dir = fresh_run / "commands"
+    selected_copy = Path(verify["coverage_report"]["selected_copy_path"])
+
+    assert verify["passed"] is True
+    assert verify_json["coverage_report"]["freshness"] == "fresh"
+    assert verify["coverage"]["line_rate_percent"] == 92.0
+    assert selected_copy.exists()
+    assert selected_copy.name == "selected_coverage_report.xml"
+    assert verify["coverage_report"]["selected_sha256"]
+    assert any(candidate["exists"] and candidate["freshness"] == "fresh" for candidate in verify["coverage_report"]["candidates"])
+    for label in ("build", "test", "coverage"):
+        command = verify["commands"][label]
+        provenance = command["provenance"]
+        assert command["command"]
+        assert provenance["command_sha256"]
+        assert provenance["cwd"] == str(root.resolve())
+        assert provenance["source"].startswith("profile.build.")
+        assert provenance["timeout_seconds"] > 0
+        assert provenance["timeout_source"].startswith("profile.build.")
+        assert provenance["shell"] is True
+        assert provenance["requires_user_review"] is True
+        assert provenance["review_status"] == "profile_command_unverified"
+        assert "executed through the shell" in provenance["risk_note"]
+        assert (commands_dir / f"{label}.stdout.tail.log").exists()
+        assert (commands_dir / f"{label}.stderr.tail.log").exists()
+    assert "Coverage Report Freshness" in checklist
+    assert "Profile Command Provenance" in checklist
+
+    stale_run = root / ".gtestcov" / "runs" / "round06-stale"
+    stale_run.mkdir(parents=True, exist_ok=True)
+    write_coverage_goal(stale_run, "src/target.cpp", 80)
+    old_time = time.time() - 10
+    os.utime(root / "coverage.xml", (old_time, old_time))
+    synced_profile.build.target_coverage_command = f'"{sys.executable}" -c "print(\'round06 coverage noop\')"'
+    (root / "project_profile.yaml").write_text(profile_to_yaml(synced_profile), encoding="utf-8")
+
+    stale = run_gtestcov_json(["verify", "--project-root", str(root), "--run-id", "round06-stale"])
+    stale_checklist = (stale_run / "review_checklist.md").read_text(encoding="utf-8")
+
+    assert stale["commands"]["coverage"]["returncode"] == 0
+    assert stale["coverage"]["found"] is False
+    assert stale["coverage"]["report_freshness"] == "stale_or_unverified"
+    assert stale["coverage_report"]["selected"] == ""
+    assert any(candidate["exists"] and candidate["freshness"] == "stale" for candidate in stale["coverage_report"]["candidates"])
+    assert "coverage is unavailable because no fresh report was produced" in stale_checklist
+    assert stale["passed"] is False
+
+
+def test_round07_real_project_pilot_phase_a_fixture_without_verify(tmp_path: Path) -> None:
+    root = copy_mini_repo(tmp_path)
+    for path in [
+        root / ".repo" / "manifests" / "ignored.cpp",
+        root / "out" / "generated.cpp",
+        root / "third_party" / "ignored.cpp",
+        root / "vendor" / "ignored.cpp",
+        root / "prebuilts" / "ignored.cpp",
+    ]:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("int ignored = 1;\n", encoding="utf-8")
+
+    version_info = run_gtestcov_json(["version"])
+    install = run_gtestcov_json(["install", "doctor", "--project-root", str(root)])
+    doctor = run_gtestcov_json(["codrax", "doctor", "--project-root", str(root), "--run-id", "round07-doctor"])
+    init = run_gtestcov_json(["init", "--project-root", str(root)])
+    index_built = run_gtestcov_json(["index", "build", "--project-root", str(root)])
+    index_status_data = run_gtestcov_json(["index", "status", "--project-root", str(root)])
+    quick = run_gtestcov_json(
+        [
+            "codrax-check",
+            "--quick",
+            "--project-root",
+            str(root),
+            "--run-id",
+            "round07-quick-missing-codrax",
+            "--target",
+            "src/energy_service.cpp",
+            "--build-file",
+            "CMakeLists.txt",
+        ]
+    )
+
+    assert "version" in version_info
+    assert install["status"] in {"ok", "warnings"}
+    assert Path(str(init["profile"])).exists()
+    assert doctor["mode"] == "doctor"
+    assert doctor["status"] == "command_not_found"
+    assert doctor["available"] is False
+    assert quick["mode"] == "quick"
+    assert quick["status"] == "command_not_found"
+    assert quick["available"] is False
+    assert {item["relative_path"] for item in quick["local_files"]} == {"src/energy_service.cpp", "CMakeLists.txt"}
+    assert not quick["local_errors"]
+    assert index_built["status"] == "built"
+    assert index_status_data["status"] == "ready"
+    assert index_status_data["hit"] is True
+
+    file_index = json.loads((root / ".gtestcov" / "cache" / "file_index.json").read_text(encoding="utf-8"))
+    indexed_files = set(file_index["files"])
+    assert "src/energy_service.cpp" in indexed_files
+    assert "tests/energy_service_component_test.cpp" in indexed_files
+    assert "CMakeLists.txt" in indexed_files
+    assert not any(path.startswith((".repo/", "out/", "third_party/", "vendor/", "prebuilts/")) for path in indexed_files)
+
+    fake_codrax = write_fake_codrax(
+        tmp_path,
+        """
+- build.build_file: CMakeLists.txt # CMakeLists.txt:1
+- build.candidate_build_files: CMakeLists.txt # CMakeLists.txt:1
+- build.build_command: cmake -S . -B build && cmake --build build # CMakeLists.txt:1
+- build.test_command: ctest --test-dir build --output-on-failure # CMakeLists.txt:1
+- build.coverage_command: gcovr -r . --xml -o coverage.xml # CMakeLists.txt:1
+- test_support.test_dirs: tests # tests/energy_service_component_test.cpp:1
+- test_support.test_build_config_paths: CMakeLists.txt # CMakeLists.txt:1
+- [target_behavior] src/energy_service.cpp:12 initializes the energy service.
+""",
+    )
+    profile = load_profile(root)
+    profile.build.build_command = ""
+    profile.build.test_command = ""
+    profile.build.coverage_command = ""
+    profile.evidence.codrax.enabled = True
+    profile.evidence.codrax.command = fake_codrax
+    (root / "project_profile.yaml").write_text(profile_to_yaml(profile), encoding="utf-8")
+
+    first_sync = profile_sync(root, "src/energy_service.cpp", run_id="round07-profile-sync", line_coverage=80, build_file="CMakeLists.txt")
+    second_sync = profile_sync(root, "src/energy_service.cpp", run_id="round07-profile-sync-cache", line_coverage=80, build_file="CMakeLists.txt")
+    synced_profile = load_profile(root)
+    pack_path = Path(first_sync["codrax_evidence"]["cache"]["path"])
+    pack = json.loads(pack_path.read_text(encoding="utf-8"))
+    profile_evidence = Path(first_sync["profile_evidence_path"]).read_text(encoding="utf-8")
+
+    assert first_sync["status"] == "ok"
+    assert first_sync["executable_command_candidates"]["build.build_command"]["review_status"] == "not_written_to_profile"
+    assert first_sync["executable_command_candidates"]["build.test_command"]["review_status"] == "not_written_to_profile"
+    assert first_sync["executable_command_candidates"]["build.coverage_command"]["review_status"] == "not_written_to_profile"
+    assert synced_profile.build.build_command == ""
+    assert synced_profile.build.test_command == ""
+    assert synced_profile.build.coverage_command == ""
+    assert "Executable Command Candidates Requiring Review" in profile_evidence
+    assert pack["schema_version"] == EVIDENCE_PACK_SCHEMA_VERSION
+    assert CODRAX_PAYLOAD in pack["payloads"]
+    assert "legacy_codrax" not in pack["payloads"]
+    assert "payload" not in pack
+    assert "codrax_evidence" not in pack
+    assert isinstance(pack["hits"], list)
+    assert second_sync["evidence_cache"]["hit"] is True
+    assert second_sync["codrax_evidence"]["cache"]["payload_name"] == CODRAX_PAYLOAD
+    assert "legacy_schema" not in second_sync["codrax_evidence"]["cache"]
+    assert "checked_schema_versions" not in second_sync["codrax_evidence"]["cache"]
+    assert not (root / ".gtestcov" / "runs" / "round07-verify").exists()
+
+
 def test_evidence_backends_return_uniform_hits(tmp_path: Path) -> None:
     root = tmp_path / "evidence_backends"
     (root / "src").mkdir(parents=True)
@@ -569,6 +1103,32 @@ def test_evidence_backends_return_uniform_hits(tmp_path: Path) -> None:
     assert codrax_hits[0].backend == "codrax"
     assert codrax_hits[0].path == "src/target.cpp"
     assert codrax_hits[0].line == 2
+
+
+def test_bulk_symbol_scan_stays_within_source_roots_even_with_index(tmp_path: Path) -> None:
+    root = tmp_path / "bulk_symbol_scope"
+    (root / "src").mkdir(parents=True)
+    (root / "tests").mkdir()
+    (root / "src" / "target.cpp").write_text("extern void SOURCE_ONLY_SYMBOL();\n", encoding="utf-8")
+    (root / "tests" / "target_test.cpp").write_text("extern void TEST_ONLY_SYMBOL();\n", encoding="utf-8")
+    (root / "project_profile.yaml").write_text(
+        "project_name: bulk_symbol_scope\n"
+        "paths:\n"
+        "  source_roots: [src]\n"
+        "  test_roots: [tests]\n"
+        "  build_roots: []\n",
+        encoding="utf-8",
+    )
+    profile = load_profile(root)
+    index_build(root)
+
+    reports = {
+        report.symbol: report
+        for report in classify_symbols_bulk(root, ["SOURCE_ONLY_SYMBOL", "TEST_ONLY_SYMBOL"], profile)
+    }
+
+    assert reports["SOURCE_ONLY_SYMBOL"].locations == ["src/target.cpp:1"]
+    assert reports["TEST_ONLY_SYMBOL"].locations == []
 
 
 def test_search_backend_falls_back_to_local_index_when_zoekt_missing(tmp_path: Path, monkeypatch) -> None:
@@ -1177,7 +1737,7 @@ def test_codrax_check_and_evidence_cli_with_fake_command(tmp_path: Path) -> None
     )
     enable_codrax(root, command)
 
-    check = codrax_check(root, run_id="codrax-check-unit")
+    check = codrax_check(root, run_id="codrax-check-unit", mode="deep")
     evidence = subprocess.run(
         [
             sys.executable,
@@ -1215,6 +1775,7 @@ def test_codrax_check_and_evidence_cli_with_fake_command(tmp_path: Path) -> None
     cli_run_dir = root / ".gtestcov" / "runs" / "codrax-check-cli"
 
     assert check["status"] == "ok"
+    assert check["mode"] == "deep"
     assert check["run_id"] == "codrax-check-unit"
     assert Path(check["status_path"]).exists()
     assert Path(check["final_log_path"]).exists()
@@ -1446,6 +2007,69 @@ def test_codrax_doctor_and_default_check_do_not_read_repository(tmp_path: Path) 
     assert all("--request" not in invocation for invocation in invocations)
 
 
+def test_codrax_check_helper_defaults_to_doctor(tmp_path: Path) -> None:
+    root = copy_mini_repo(tmp_path)
+    log_path = tmp_path / "codrax_invocations.ndjson"
+    enable_codrax(root, write_fake_codrax_check_logger(tmp_path, log_path))
+
+    result = codrax_check(root, run_id="codrax-helper-default")
+    invocations = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+
+    assert result["mode"] == "doctor"
+    assert result["status"] == "ok"
+    assert not (root / ".gtestcov" / "runs" / "codrax-helper-default" / "codrax_status.json").exists()
+    assert invocations
+    assert all("--repo" not in invocation for invocation in invocations)
+    assert all("--request" not in invocation for invocation in invocations)
+
+
+def test_codrax_check_helper_deep_is_explicit(tmp_path: Path) -> None:
+    root = copy_mini_repo(tmp_path)
+    log_path = tmp_path / "codrax_invocations.ndjson"
+    enable_codrax(root, write_fake_codrax_check_logger(tmp_path, log_path))
+
+    result = codrax_check(root, run_id="codrax-helper-deep", mode="deep")
+    invocations = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    repo_invocations = [invocation for invocation in invocations if "--repo" in invocation]
+
+    assert result["mode"] == "deep"
+    assert result["status"] == "ok"
+    assert "CMakeLists.txt:1" in result["file_line_refs"]
+    assert Path(result["status_path"]).exists()
+    assert Path(result["final_log_path"]).exists()
+    assert repo_invocations
+    assert "--request" in repo_invocations[-1]
+
+
+def test_codrax_cli_help_describes_doctor_quick_and_deep_modes() -> None:
+    env = {**dict(subprocess.os.environ), "PYTHONPATH": str(REPO_ROOT / "src")}
+    check_help = subprocess.run(
+        [sys.executable, "-m", "gtestcov.cli", "codrax-check", "--help"],
+        cwd=REPO_ROOT,
+        env=env,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    doctor_help = subprocess.run(
+        [sys.executable, "-m", "gtestcov.cli", "codrax", "doctor", "--help"],
+        cwd=REPO_ROOT,
+        env=env,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    assert check_help.returncode == 0
+    assert doctor_help.returncode == 0
+    assert "no flags it runs the lightweight doctor check" in check_help.stdout
+    assert "--quick checks only explicit target/build-file inputs" in check_help.stdout
+    assert "--deep explicitly runs" in check_help.stdout
+    assert "long-running repository citation probe" in check_help.stdout
+    assert "does not read the repository" in doctor_help.stdout
+    assert "does not require file:line evidence" in doctor_help.stdout
+
+
 def test_codrax_check_quick_uses_explicit_target_and_build_file(tmp_path: Path) -> None:
     root = copy_mini_repo(tmp_path)
     log_path = tmp_path / "codrax_quick_invocations.ndjson"
@@ -1494,12 +2118,49 @@ def test_codrax_check_quick_uses_explicit_target_and_build_file(tmp_path: Path) 
     assert "CMakeLists.txt" in request
 
 
+def test_codrax_check_quick_requires_target_and_build_file(tmp_path: Path) -> None:
+    root = copy_mini_repo(tmp_path)
+    log_path = tmp_path / "codrax_quick_missing.ndjson"
+    enable_codrax(root, write_fake_codrax_check_logger(tmp_path, log_path))
+    env = {**dict(subprocess.os.environ), "PYTHONPATH": str(REPO_ROOT / "src")}
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "gtestcov.cli",
+            "codrax-check",
+            "--quick",
+            "--project-root",
+            str(root),
+            "--run-id",
+            "codrax-quick-missing-cli",
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    data = json.loads(completed.stdout)
+    invocations = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+
+    assert completed.returncode == 0
+    assert data["mode"] == "quick"
+    assert data["status"] == "local_input_error"
+    assert "missing required quick check target" in data["local_errors"]
+    assert "missing required quick check build_file" in data["local_errors"]
+    assert all("--repo" not in invocation for invocation in invocations)
+    assert all("--request" not in invocation for invocation in invocations)
+
+
 def test_codrax_auto_discovers_alternate_cli_protocol(tmp_path: Path) -> None:
     root = copy_mini_repo(tmp_path)
     enable_codrax(root, write_fake_codrax_alt_cli(tmp_path))
 
     analysis = analyze_target(root, "src/energy_service.cpp", run_id="codrax-alt")
-    check = codrax_check(root)
+    check = codrax_check(root, mode="deep")
 
     assert analysis.codrax_evidence.status == "ok"
     assert analysis.codrax_evidence.invocation == "ask_path_prompt_flags"
@@ -1517,7 +2178,7 @@ def test_codrax_args_template_handles_unrecognized_cli_protocol(tmp_path: Path) 
     (root / "project_profile.yaml").write_text(profile_to_yaml(profile), encoding="utf-8")
 
     analysis = analyze_target(root, "src/energy_service.cpp", run_id="codrax-template")
-    check = codrax_check(root)
+    check = codrax_check(root, mode="deep")
 
     assert analysis.codrax_evidence.status == "ok"
     assert analysis.codrax_evidence.invocation == "args_template"
@@ -1565,6 +2226,53 @@ def test_codrax_records_native_log_status_and_final_summary(tmp_path: Path) -> N
     assert "progress: indexing" in final_text
     assert evidence.final_log_truncated is False
     assert evidence.final_log_size_bytes == final_log.stat().st_size
+
+
+def test_round06_e2e_dry_run_fake_codrax_observability(tmp_path: Path) -> None:
+    root = make_round06_mini_cpp_project(tmp_path)
+    command = write_fake_streaming_codrax(
+        tmp_path,
+        [
+            ("stdout", "- phase 1: src/target.cpp:3 inspecting add_one.", 0.35),
+            ("stderr", "progress: reading tests/test_target.cpp:1", 0.35),
+            ("stdout", "- final: CMakeLists.txt:1 confirms build context.", 0),
+        ],
+    )
+    profile = load_profile(root)
+    profile.evidence.codrax.enabled = True
+    profile.evidence.codrax.command = command
+    profile.evidence.codrax.idle_timeout_seconds = 2
+    profile.evidence.codrax.max_runtime_seconds = 10
+    profile.evidence.codrax.status_update_interval_seconds = 0.2
+    (root / "project_profile.yaml").write_text(profile_to_yaml(profile), encoding="utf-8")
+
+    understanding, _ = generate_project_understanding(root, "src/target.cpp", run_id="round06-observable")
+    evidence = understanding.codrax_evidence
+
+    run_dir = root / ".gtestcov" / "runs" / "round06-observable"
+    status = json.loads((run_dir / "gtestcov_status.json").read_text(encoding="utf-8"))
+    codrax_status = json.loads((run_dir / "codrax_status.json").read_text(encoding="utf-8"))
+    events = [json.loads(line) for line in (run_dir / "gtestcov_events.ndjson").read_text(encoding="utf-8").splitlines() if line.strip()]
+    final_index = json.loads((run_dir / "codrax_final_outputs" / "index.json").read_text(encoding="utf-8"))
+    final_log = Path(evidence.final_log_path)
+    final_text = final_log.read_text(encoding="utf-8")
+    native_log_dir = Path(evidence.native_log_dir)
+    native_text = "\n".join(path.read_text(encoding="utf-8") for path in native_log_dir.rglob("*") if path.is_file())
+
+    assert evidence.status == "ok"
+    assert evidence.timeout_kind == ""
+    assert {"src/target.cpp:3", "CMakeLists.txt:1"} <= set(evidence.file_line_refs)
+    assert status["phase"] == "evidence.done"
+    assert codrax_status["status"] == "ok"
+    assert codrax_status["phase"] == "done"
+    assert any(event["phase"] == "codrax.heartbeat" for event in events)
+    assert native_log_dir.exists()
+    assert "progress: reading" in native_text
+    assert "tests/test_target.cpp:1" in native_text
+    assert final_log.exists()
+    assert "CODRAX Final Diagnostic Log" in final_text
+    assert "src/target.cpp:3" in final_text
+    assert final_index and final_index[0]["operation"] == "project_understanding"
 
 
 def test_codrax_long_running_with_activity_completes_and_records_outer_status(tmp_path: Path) -> None:
@@ -1903,6 +2611,7 @@ def test_profile_sync_updates_profile_with_codrax_evidence(tmp_path: Path) -> No
 """,
     )
     enable_codrax(root, command)
+    original_profile = load_profile(root)
 
     result = profile_sync(root, "src/energy_service.cpp", run_id="profile-sync", line_coverage=82, build_file="CMakeLists.txt")
     profile = load_profile(root)
@@ -1910,16 +2619,25 @@ def test_profile_sync_updates_profile_with_codrax_evidence(tmp_path: Path) -> No
     assert result["status"] == "ok"
     assert result["updated"] is True
     assert Path(result["backup_path"]).exists()
-    assert (root / ".gtestcov" / "runs" / "profile-sync" / "profile_evidence.md").exists()
-    assert profile.build.incremental_build_command == "cmake --build build --target energy_tests"
+    profile_evidence = (root / ".gtestcov" / "runs" / "profile-sync" / "profile_evidence.md").read_text(encoding="utf-8")
+    assert profile.build.incremental_build_command == ""
+    assert profile.build.build_command == original_profile.build.build_command
     assert profile.build.build_file == "CMakeLists.txt"
     assert profile.build.candidate_build_files == ["CMakeLists.txt", "tests/CMakeLists.txt"]
-    assert profile.build.filtered_test_command == "ctest --test-dir build -R EnergyService"
-    assert profile.build.target_coverage_command.startswith("gcovr -r . --filter")
+    assert profile.build.filtered_test_command == ""
+    assert profile.build.target_coverage_command == ""
     assert profile.test_support.test_build_config_paths == ["CMakeLists.txt"]
     assert profile.targets.default_line_coverage == 82
     assert profile.evidence.codrax.direct_mode.enabled is True
     assert result["build_file_comparison"]["status"] == "matched"
+    assert "build.incremental_build_command" not in result["updates"]
+    assert result["executable_command_candidates"]["build.incremental_build_command"]["value"] == "cmake --build build --target energy_tests"
+    assert result["executable_command_candidates"]["build.filtered_test_command"]["value"] == "ctest --test-dir build -R EnergyService"
+    assert result["executable_command_candidates"]["build.target_coverage_command"]["value"].startswith("gcovr -r . --filter")
+    assert result["executable_command_candidates"]["build.build_command"]["review_status"] == "not_written_to_profile"
+    assert "Executable Command Candidates Requiring Review" in profile_evidence
+    assert "not written to executable project_profile.yaml fields" in profile_evidence
+    assert any("executable command candidates require user review" in note for note in result["notes"])
 
 
 def test_evidence_pack_cache_hits_and_invalidates_for_analyze(tmp_path: Path) -> None:
@@ -2258,6 +2976,7 @@ def test_cover_builds_single_file_task_with_coverage_goal(tmp_path: Path) -> Non
     assert "Target line coverage goal: `88%" in task
     assert "CMakeLists.txt" in task
     assert "User build file anchor" in task
+    assert "Configured commands execute through `shell=True` from the project root" in task
     assert "Do not edit the target file `src/energy_service.cpp`" in task
     assert status["phase"] == "cover.task_ready"
     assert "cover.start" in events
@@ -2412,7 +3131,14 @@ def test_verify_uses_filtered_commands_and_target_file_coverage(tmp_path: Path) 
     coverage_script = root / "coverage_cmd.py"
     build_script.write_text("print('incremental build')\n", encoding="utf-8")
     test_script.write_text("print('filtered test')\n", encoding="utf-8")
-    coverage_script.write_text("print('target coverage')\n", encoding="utf-8")
+    coverage_script.write_text(
+        "from pathlib import Path\n"
+        "print('target coverage')\n"
+        "Path('coverage.xml').write_text("
+        "'<coverage><packages><package><classes><class filename=\"src/foo.cpp\" line-rate=\"0.85\" /></classes></package></packages></coverage>', "
+        "encoding='utf-8')\n",
+        encoding="utf-8",
+    )
     (root / "project_profile.yaml").write_text(
         f"""
 project_name: verify_project
@@ -2430,7 +3156,7 @@ evidence:
         encoding="utf-8",
     )
     (root / "coverage.xml").write_text(
-        '<coverage><packages><package><classes><class filename="src/foo.cpp" line-rate="0.85" /></classes></package></packages></coverage>',
+        '<coverage><packages><package><classes><class filename="src/foo.cpp" line-rate="0.10" /></classes></package></packages></coverage>',
         encoding="utf-8",
     )
     run_dir = root / ".gtestcov" / "runs" / "verify"
@@ -2447,9 +3173,126 @@ evidence:
     assert (commands_dir / "test.stdout.tail.log").read_text(encoding="utf-8").strip() == "filtered test"
     assert (commands_dir / "coverage.stdout.tail.log").read_text(encoding="utf-8").strip() == "target coverage"
     assert verify["commands"]["build"]["stdout_tail_path"].endswith("build.stdout.tail.log")
+    build_provenance = verify["commands"]["build"]["provenance"]
+    coverage_provenance = verify["commands"]["coverage"]["provenance"]
+    assert build_provenance["source"] == "profile.build.incremental_build_command"
+    assert build_provenance["cwd"] == str(root.resolve())
+    assert build_provenance["shell"] is True
+    assert build_provenance["command_sha256"]
+    assert build_provenance["review_status"] == "profile_command_unverified"
+    assert coverage_provenance["source"] == "profile.build.target_coverage_command"
+    assert coverage_provenance["timeout_source"] == "profile.build.coverage_timeout_seconds"
     assert verify["coverage"]["line_rate_percent"] == 85.0
     assert verify["coverage"]["meets_threshold"] is True
+    assert verify["coverage"]["report_freshness"] == "fresh"
+    assert verify["coverage_report"]["freshness"] == "fresh"
+    assert verify["coverage_report"]["selected"] == "coverage.xml"
+    assert verify["coverage_report"]["selected_sha256"]
+    selected_candidate = next(
+        candidate
+        for candidate in verify["coverage_report"]["candidates"]
+        if candidate["display_path"] == verify["coverage_report"]["selected"]
+    )
+    assert selected_candidate["sha256"]
+    assert selected_candidate["mtime_epoch"] is not None
+    assert selected_candidate["source"] == "configured_path"
+    selected_copy = Path(verify["coverage_report"]["selected_copy_path"])
+    assert selected_copy.exists()
+    assert selected_copy.name == "selected_coverage_report.xml"
+    checklist = (run_dir / "review_checklist.md").read_text(encoding="utf-8")
+    assert "Coverage Report Freshness" in checklist
+    assert "Profile Command Provenance" in checklist
     assert verify["passed"] is True
+
+
+def test_verify_rejects_stale_coverage_after_failed_coverage_command(tmp_path: Path) -> None:
+    root = tmp_path / "stale_coverage_project"
+    root.mkdir()
+    profile = load_profile(root)
+    profile.build.coverage_command = f'"{sys.executable}" -c "import sys; sys.exit(3)"'
+    profile.build.coverage_xml = "coverage.xml"
+    profile.evidence.codrax.enabled = False
+    (root / "project_profile.yaml").write_text(profile_to_yaml(profile), encoding="utf-8")
+    write_target_coverage(root, "src/foo.cpp", 0.99)
+    old_time = time.time() - 10
+    os.utime(root / "coverage.xml", (old_time, old_time))
+    run_dir = root / ".gtestcov" / "runs" / "stale"
+    run_dir.mkdir(parents=True)
+    write_coverage_goal(run_dir, "src/foo.cpp", 80)
+
+    verify = verify_iteration(root, run_id="stale")
+
+    assert verify["commands"]["coverage"]["returncode"] == 3
+    assert verify["coverage"]["found"] is False
+    assert verify["coverage"]["line_rate_percent"] is None
+    assert verify["coverage"]["meets_threshold"] is False
+    assert verify["coverage"]["report_freshness"] == "stale_or_unverified"
+    assert verify["coverage_report"]["selected"] == ""
+    assert verify["coverage_report"]["reason"] == "coverage_report_stale_or_unverified"
+    existing_candidates = [candidate for candidate in verify["coverage_report"]["candidates"] if candidate["exists"]]
+    assert existing_candidates
+    assert all(candidate["freshness"] == "stale" for candidate in existing_candidates)
+    assert {candidate["reason"] for candidate in existing_candidates} == {"coverage_command_failed_or_timed_out"}
+    checklist = (run_dir / "review_checklist.md").read_text(encoding="utf-8")
+    assert "coverage is unavailable because no fresh report was produced" in checklist
+    assert verify["passed"] is False
+
+
+def test_verify_rejects_stale_coverage_after_successful_noop_coverage_command(tmp_path: Path) -> None:
+    root = tmp_path / "stale_after_success_project"
+    root.mkdir()
+    profile = load_profile(root)
+    profile.build.coverage_command = f'"{sys.executable}" -c "print(\'coverage command did not write report\')"'
+    profile.build.coverage_xml = "coverage.xml"
+    profile.evidence.codrax.enabled = False
+    (root / "project_profile.yaml").write_text(profile_to_yaml(profile), encoding="utf-8")
+    write_target_coverage(root, "src/foo.cpp", 0.99)
+    old_time = time.time() - 10
+    os.utime(root / "coverage.xml", (old_time, old_time))
+    run_dir = root / ".gtestcov" / "runs" / "stale-success"
+    run_dir.mkdir(parents=True)
+    write_coverage_goal(run_dir, "src/foo.cpp", 80)
+
+    verify = verify_iteration(root, run_id="stale-success")
+
+    assert verify["commands"]["coverage"]["returncode"] == 0
+    assert verify["coverage"]["found"] is False
+    assert verify["coverage"]["line_rate_percent"] is None
+    assert verify["coverage"]["report_freshness"] == "stale_or_unverified"
+    assert verify["coverage_report"]["selected"] == ""
+    existing_candidates = [candidate for candidate in verify["coverage_report"]["candidates"] if candidate["exists"]]
+    assert existing_candidates
+    assert all(candidate["freshness"] == "stale" for candidate in existing_candidates)
+    assert {candidate["reason"] for candidate in existing_candidates} == {"mtime_before_coverage_command_start"}
+    assert verify["passed"] is False
+
+
+def test_verify_existing_coverage_without_command_is_unknown_existing_report(tmp_path: Path) -> None:
+    root = tmp_path / "existing_coverage_project"
+    root.mkdir()
+    profile = load_profile(root)
+    profile.build.coverage_xml = "coverage.xml"
+    profile.evidence.codrax.enabled = False
+    (root / "project_profile.yaml").write_text(profile_to_yaml(profile), encoding="utf-8")
+    write_target_coverage(root, "src/foo.cpp", 0.91)
+    run_dir = root / ".gtestcov" / "runs" / "existing"
+    run_dir.mkdir(parents=True)
+    write_coverage_goal(run_dir, "src/foo.cpp", 80)
+
+    verify = verify_iteration(root, run_id="existing")
+
+    assert verify["commands"]["coverage"]["configured"] is False
+    assert verify["coverage"]["line_rate_percent"] == 91.0
+    assert verify["coverage"]["meets_threshold"] is True
+    assert verify["coverage"]["report_freshness"] == "unknown_existing_report"
+    assert verify["coverage_report"]["freshness"] == "unknown_existing_report"
+    assert verify["coverage_report"]["reason"] == "no_coverage_command_run"
+    assert Path(verify["coverage_report"]["selected_copy_path"]).exists()
+    existing_candidates = [candidate for candidate in verify["coverage_report"]["candidates"] if candidate["exists"]]
+    assert existing_candidates
+    assert all(candidate["freshness"] == "unknown_existing_report" for candidate in existing_candidates)
+    checklist = (run_dir / "review_checklist.md").read_text(encoding="utf-8")
+    assert "no coverage command ran" in checklist
 
 
 def test_verify_command_timeout_is_reported_and_cli_override_works(tmp_path: Path) -> None:
@@ -2491,12 +3334,34 @@ def test_verify_command_timeout_is_reported_and_cli_override_works(tmp_path: Pat
     assert "timed out after 1 seconds" in verify["commands"]["build"]["diagnostics"][0]
     assert verify["commands"]["build"]["process_cleanup"]["process_tree_guaranteed"] is False
     assert "subprocess.kill()" in verify["commands"]["build"]["process_cleanup"]["warning"]
+    provenance = verify["commands"]["build"]["provenance"]
+    assert provenance["source"] == "profile.build.build_command"
+    assert provenance["timeout_source"] == "cli_override"
+    assert provenance["timeout_seconds"] == 1
+    assert provenance["cwd"] == str(root.resolve())
+    assert provenance["shell"] is True
+    assert provenance["command_sha256"]
+    assert provenance["review_status"] == "profile_command_unverified"
     assert "build started" in verify["commands"]["build"]["stdout"]
     assert "build started" in (commands_dir / "build.stdout.tail.log").read_text(encoding="utf-8")
     assert Path(verify["commands"]["build"]["timeout_artifacts"]["json"]).exists()
     assert Path(verify["commands"]["build"]["timeout_artifacts"]["markdown"]).exists()
     timeout_artifact = json.loads(Path(verify["commands"]["build"]["timeout_artifacts"]["json"]).read_text(encoding="utf-8"))
+    timeout_markdown = Path(verify["commands"]["build"]["timeout_artifacts"]["markdown"]).read_text(encoding="utf-8")
+    assert timeout_artifact["process_cleanup"]["method"] == "process.kill"
+    assert isinstance(timeout_artifact["process_cleanup"]["pid"], int)
     assert timeout_artifact["process_cleanup"]["process_tree_guaranteed"] is False
+    assert timeout_artifact["provenance"]["source"] == "profile.build.build_command"
+    assert timeout_artifact["provenance"]["timeout_source"] == "cli_override"
+    assert timeout_artifact["provenance"]["command_sha256"] == provenance["command_sha256"]
+    assert "Command source: `profile.build.build_command`" in timeout_markdown
+    assert "Command SHA256:" in timeout_markdown
+    assert f"CWD: `{root.resolve()}`" in timeout_markdown
+    assert "Shell: `true`" in timeout_markdown
+    assert "Command review status: `profile_command_unverified`" in timeout_markdown
+    assert "Process cleanup method: `process.kill`" in timeout_markdown
+    assert "Process tree guaranteed: `false`" in timeout_markdown
+    assert "Cleanup warning:" in timeout_markdown
     assert "verify.build.heartbeat" in events
     assert verify_json["commands"]["build"]["timeout"] is True
     assert verify["passed"] is False
@@ -3198,7 +4063,7 @@ def test_version_and_install_doctor_report_environment(tmp_path: Path) -> None:
     info = get_version_info(REPO_ROOT)
     doctor = install_doctor(project_root=project, tool_root=REPO_ROOT, tool_home=tmp_path / "tool_home")
 
-    assert info.version == "0.3.0"
+    assert info.version == "0.4.0"
     assert info.version_source == "pyproject.toml"
     assert info.memory_schema_version >= 1
     assert isinstance(info.git_dirty, bool)

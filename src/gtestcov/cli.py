@@ -17,7 +17,7 @@ from .next_round import plan_next_round
 from .opencode import write_opencode_files
 from .preflight import preflight_check
 from .profile_sync import profile_sync
-from .profile import write_default_profile
+from .profile import write_init_profile
 from .run_status import show_status
 from .search_backend import search_doctor, search_index, search_query
 from .semantic_backend import semantic_doctor, semantic_overview, semantic_references
@@ -35,6 +35,16 @@ from .verify import verify_iteration
 from .version import get_version_info, package_root
 
 
+def _positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"{value!r} is not an integer") from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be greater than 0")
+    return parsed
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="gtestcov")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -42,6 +52,13 @@ def main(argv: list[str] | None = None) -> None:
     init = sub.add_parser("init", help="Create project_profile.yaml and OpenCode command files.")
     init.add_argument("--project-root", default=".")
     init.add_argument("--overwrite", action="store_true")
+    init.add_argument("--source-root", action="append", default=None, help="Project-local source scan root; repeat for multiple roots.")
+    init.add_argument("--test-root", action="append", default=None, help="Project-local test scan root; repeat for multiple roots.")
+    init.add_argument("--build-root", action="append", default=None, help="Project-local build/config scan root; repeat for multiple roots.")
+    init.add_argument("--build-file", default=None, help="Project-local build entry file, for example CMakeLists.txt.")
+    init.add_argument("--exclude-dir", action="append", default=None, help="Project-local directory to exclude from scans; repeat for multiple dirs.")
+    init.add_argument("--max-files", type=_positive_int, default=None, help="Maximum files to include in project scans.")
+    init.add_argument("--max-file-bytes", type=_positive_int, default=None, help="Maximum file bytes to inspect for content probes.")
 
     discover = sub.add_parser("discover", help="Discover project style.")
     discover.add_argument("--project-root", default=".")
@@ -88,18 +105,29 @@ def main(argv: list[str] | None = None) -> None:
     cover.add_argument("--build-file", default="")
     cover.add_argument("--run-id", default="")
 
-    codrax_cmd = sub.add_parser("codrax", help="CODRAX integration checks.")
+    codrax_cmd = sub.add_parser("codrax", help="CODRAX diagnostics and explicit integration checks.")
     codrax_sub = codrax_cmd.add_subparsers(dest="codrax_command", required=True)
-    codrax_doctor_cmd = codrax_sub.add_parser("doctor", help="Check CODRAX CLI availability and protocol without reading the repository.")
+    codrax_doctor_cmd = codrax_sub.add_parser(
+        "doctor",
+        help="Lightweight CODRAX CLI/protocol check; does not read the repository or require file:line evidence.",
+        description="Lightweight CODRAX CLI/protocol check. It does not read the repository and does not require file:line evidence.",
+    )
     codrax_doctor_cmd.add_argument("--project-root", default=".")
     codrax_doctor_cmd.add_argument("--run-id", default="")
 
-    codrax_check_cmd = sub.add_parser("codrax-check", help="Check the configured CODRAX CLI integration.")
+    codrax_check_cmd = sub.add_parser(
+        "codrax-check",
+        help="Compatibility entry point; no flags runs lightweight doctor, --quick checks explicit files, --deep runs repository citation probe.",
+        description=(
+            "Compatibility entry point. With no flags it runs the lightweight doctor check. "
+            "--quick checks only explicit target/build-file inputs. --deep explicitly runs the long-running repository citation probe."
+        ),
+    )
     codrax_check_cmd.add_argument("--project-root", default=".")
     codrax_check_cmd.add_argument("--run-id", default="")
     codrax_check_mode = codrax_check_cmd.add_mutually_exclusive_group()
-    codrax_check_mode.add_argument("--quick", action="store_true", help="Check only explicit target/build-file inputs.")
-    codrax_check_mode.add_argument("--deep", action="store_true", help="Run the repository citation probe.")
+    codrax_check_mode.add_argument("--quick", action="store_true", help="Check only explicit target/build-file inputs; not a full repository search.")
+    codrax_check_mode.add_argument("--deep", action="store_true", help="Run the long-running repository citation probe explicitly.")
     codrax_check_cmd.add_argument("--target", default="")
     codrax_check_cmd.add_argument("--build-file", default="")
 
@@ -243,9 +271,22 @@ def main(argv: list[str] | None = None) -> None:
     if args.command == "init":
         root = Path(args.project_root).resolve()
         root.mkdir(parents=True, exist_ok=True)
-        profile_path = write_default_profile(root, overwrite=args.overwrite)
+        try:
+            profile_path, _profile, profile_updated = write_init_profile(
+                root,
+                overwrite=args.overwrite,
+                source_roots=args.source_root,
+                test_roots=args.test_root,
+                build_roots=args.build_root,
+                exclude_dirs=args.exclude_dir,
+                build_file=args.build_file,
+                max_files=args.max_files,
+                max_file_bytes=args.max_file_bytes,
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
         opencode = write_opencode_files(root, overwrite=args.overwrite)
-        print(json.dumps({"profile": str(profile_path), **opencode}, indent=2))
+        print(json.dumps({"profile": str(profile_path), "profile_updated": profile_updated, **opencode}, indent=2))
     elif args.command == "discover":
         print(discover_project(Path(args.project_root)).model_dump_json(indent=2))
     elif args.command == "analyze":

@@ -5,7 +5,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from .file_index import load_file_index
-from .fs import CPP_SUFFIXES, iter_files, read_text, scan_roots_from_profile
+from .fs import CPP_SUFFIXES, iter_files, read_text
 from .models import DependencyEntry, DependencyReport, SymbolReport, relpath
 from .profile import ProjectProfile
 
@@ -157,17 +157,28 @@ def _candidate_symbol_files(project_root: Path, root: Path, profile: ProjectProf
             for rel, record in index["files"].items():
                 if str(record.get("suffix", "")).lower() in CPP_SUFFIXES:
                     path = project_root / rel
-                    if path.exists() and path.is_file():
+                    if path.exists() and path.is_file() and _within_source_roots(project_root, path, profile):
                         files.append(path)
             return files
         return iter_files(
             root,
             CPP_SUFFIXES,
-            scan_roots=scan_roots_from_profile(profile),
+            scan_roots=profile.paths.source_roots,
             exclude_dirs=profile.paths.exclude_dirs,
             max_files=profile.paths.max_files,
         )
     return iter_files(root, CPP_SUFFIXES, exclude_dirs=profile.paths.exclude_dirs, max_files=profile.paths.max_files)
+
+
+def _within_source_roots(project_root: Path, path: Path, profile: ProjectProfile) -> bool:
+    resolved = path.resolve()
+    for raw_root in profile.paths.source_roots:
+        try:
+            resolved.relative_to((project_root / raw_root).resolve())
+            return True
+        except ValueError:
+            continue
+    return False
 
 
 def _classify_symbol_line(symbol: str, stripped: str, current_kind: str) -> str:

@@ -229,6 +229,10 @@ Each entry must include the question or command, conclusion, cited file:line ref
 - Preflight before build/test/coverage: `{check_command}`
 - Verify this iteration with: `{verify_command}`
 
+Before running verify on a new project, review the build/test/coverage commands in `project_profile.yaml`.
+Configured commands execute through `shell=True` from the project root. `gtestcov verify` records command
+source, SHA256, CWD, timeout provenance, and review status, but it does not approve command safety for you.
+
 CODRAX request timeout behavior is activity based:
 
 - Idle timeout: `{profile.evidence.codrax.idle_timeout_seconds}` seconds without stdout/stderr or CODRAX native log growth

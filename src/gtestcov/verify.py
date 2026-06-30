@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -23,6 +26,7 @@ from .run_status import update_run_status
 
 COMMAND_TAIL_MAX_BYTES = 64 * 1024
 COMMAND_HEARTBEAT_SECONDS = 0.5
+COVERAGE_FRESHNESS_TOLERANCE_SECONDS = 2.0
 
 
 def verify_iteration(
@@ -71,8 +75,8 @@ def verify_iteration(
         )
         results["blocked_by_preflight"] = True
         results["commands"] = {
-            label: _skipped_command(command, "blocked_by_preflight")
-            for label, command, _timeout in _command_plan(profile, build_timeout, test_timeout, coverage_timeout)
+            item["label"]: _skipped_command(item, "blocked_by_preflight", root)
+            for item in _command_plan(profile, build_timeout, test_timeout, coverage_timeout)
         }
         results["coverage"] = {
             "found": False,
@@ -97,16 +101,17 @@ def verify_iteration(
         )
         return results
 
-    for label, command, timeout_seconds in _command_plan(profile, build_timeout, test_timeout, coverage_timeout):
+    for command_item in _command_plan(profile, build_timeout, test_timeout, coverage_timeout):
+        label = command_item["label"]
         update_run_status(
             run_dir,
             phase=f"verify.{label}.running",
             command="verify",
             target=target,
             current_operation=f"run_{label}_command",
-            extra={"configured": bool(command), "timeout_seconds": timeout_seconds},
+            extra={"configured": bool(command_item["command"]), "timeout_seconds": command_item["timeout_seconds"]},
         )
-        results["commands"][label] = _run_command(command, root, label, timeout_seconds, run_dir=run_dir, target=target)
+        results["commands"][label] = _run_command(command_item, root, run_dir=run_dir, target=target)
         update_run_status(
             run_dir,
             phase=f"verify.{label}.done",
@@ -127,12 +132,19 @@ def verify_iteration(
         target=target,
         current_operation="find_coverage_report",
     )
-    coverage_path = _find_coverage_report(root, run_dir, profile.build.coverage_xml)
+    coverage_report = _find_coverage_report(root, run_dir, profile.build.coverage_xml, results["commands"].get("coverage", {}))
+    results["coverage_report"] = coverage_report
+    coverage_path = Path(coverage_report["selected_path"]) if coverage_report.get("selected_path") else None
     if coverage_path:
         coverage = parse_coverage_report(coverage_path, target=target)
         coverage["path"] = relpath(coverage_path, root)
     else:
         coverage = {"found": False, "line_rate_percent": None}
+    coverage["report_freshness"] = coverage_report.get("freshness", "missing")
+    coverage["report_reason"] = coverage_report.get("reason", "")
+    coverage["selected_coverage_report"] = coverage_report.get("selected", "")
+    coverage["selected_coverage_report_copy"] = coverage_report.get("selected_copy", "")
+    coverage["selected_coverage_report_sha256"] = coverage_report.get("selected_sha256", "")
     coverage["target"] = target
     coverage["threshold_percent"] = threshold
     coverage["meets_threshold"] = (
@@ -184,40 +196,76 @@ def _command_plan(
     build_timeout: int | None = None,
     test_timeout: int | None = None,
     coverage_timeout: int | None = None,
-) -> list[tuple[str, str, int]]:
+) -> list[dict[str, Any]]:
     return [
-        (
+        _command_plan_item(
             "build",
-            profile.build.incremental_build_command or profile.build.build_command,
-            profile.build.build_timeout_seconds if build_timeout is None else build_timeout,
+            profile.build.incremental_build_command,
+            "profile.build.incremental_build_command",
+            profile.build.build_command,
+            "profile.build.build_command",
+            profile.build.build_timeout_seconds,
+            build_timeout,
         ),
-        (
+        _command_plan_item(
             "test",
-            profile.build.filtered_test_command or profile.build.test_command,
-            profile.build.test_timeout_seconds if test_timeout is None else test_timeout,
+            profile.build.filtered_test_command,
+            "profile.build.filtered_test_command",
+            profile.build.test_command,
+            "profile.build.test_command",
+            profile.build.test_timeout_seconds,
+            test_timeout,
         ),
-        (
+        _command_plan_item(
             "coverage",
-            profile.build.target_coverage_command or profile.build.coverage_command,
-            profile.build.coverage_timeout_seconds if coverage_timeout is None else coverage_timeout,
+            profile.build.target_coverage_command,
+            "profile.build.target_coverage_command",
+            profile.build.coverage_command,
+            "profile.build.coverage_command",
+            profile.build.coverage_timeout_seconds,
+            coverage_timeout,
         ),
     ]
 
 
+def _command_plan_item(
+    label: str,
+    preferred_command: str,
+    preferred_source: str,
+    fallback_command: str,
+    fallback_source: str,
+    profile_timeout: int,
+    timeout_override: int | None,
+) -> dict[str, Any]:
+    command = preferred_command or fallback_command
+    source = preferred_source if preferred_command else fallback_source if fallback_command else "not_configured"
+    return {
+        "label": label,
+        "command": command,
+        "source": source,
+        "timeout_seconds": profile_timeout if timeout_override is None else timeout_override,
+        "timeout_source": f"profile.build.{label}_timeout_seconds" if timeout_override is None else "cli_override",
+    }
+
+
 def _run_command(
-    command: str,
+    command_item: dict[str, Any],
     cwd: Path,
-    label: str = "",
-    timeout_seconds: int = 600,
     *,
     run_dir: Path | None = None,
     target: str = "",
 ) -> dict[str, Any]:
+    label = str(command_item.get("label", ""))
+    command = str(command_item.get("command", ""))
+    timeout_seconds = int(command_item.get("timeout_seconds", 600) or 0)
+    provenance = _command_provenance(command_item, cwd)
     stdout_path, stderr_path = _command_log_paths(run_dir, label)
     if not command:
         _write_empty_logs(stdout_path, stderr_path)
         return {
             "configured": False,
+            "command": command,
+            "provenance": provenance,
             "returncode": None,
             "stdout": "",
             "stderr": "",
@@ -229,6 +277,8 @@ def _run_command(
         }
     diagnostics: list[str] = []
     _write_empty_logs(stdout_path, stderr_path)
+    start_epoch = time.time()
+    started_at = _iso_from_epoch(start_epoch)
     try:
         process = subprocess.Popen(
             command,
@@ -240,17 +290,24 @@ def _run_command(
             bufsize=1,
         )
     except OSError as exc:
+        finish_epoch = time.time()
         diagnostics.append(f"{label or 'command'} command failed to start: {exc}")
         if stderr_path:
             stderr_path.write_text(str(exc), encoding="utf-8")
         return {
             "configured": True,
+            "command": command,
+            "provenance": provenance,
             "returncode": 127,
             "stdout": "",
             "stderr": str(exc),
             "diagnostics": diagnostics,
             "timeout": False,
             "timeout_seconds": timeout_seconds,
+            "started_at": started_at,
+            "started_epoch": start_epoch,
+            "finished_at": _iso_from_epoch(finish_epoch),
+            "finished_epoch": finish_epoch,
             "stdout_tail_path": str(stdout_path) if stdout_path else "",
             "stderr_tail_path": str(stderr_path) if stderr_path else "",
         }
@@ -290,6 +347,7 @@ def _run_command(
             break
         time.sleep(0.1)
     process.wait()
+    finish_epoch = time.time()
     for thread in threads:
         thread.join(timeout=2)
     stdout_tail = _read_tail_log(stdout_path)
@@ -305,15 +363,22 @@ def _run_command(
             stdout_tail,
             stderr_tail,
             process_cleanup,
+            provenance,
         )
         return {
             "configured": True,
+            "command": command,
+            "provenance": provenance,
             "returncode": 124,
             "stdout": stdout_tail,
             "stderr": stderr_tail,
             "diagnostics": diagnostics,
             "timeout": True,
             "timeout_seconds": timeout_seconds,
+            "started_at": started_at,
+            "started_epoch": start_epoch,
+            "finished_at": _iso_from_epoch(finish_epoch),
+            "finished_epoch": finish_epoch,
             "stdout_tail_path": str(stdout_path) if stdout_path else "",
             "stderr_tail_path": str(stderr_path) if stderr_path else "",
             "timeout_artifacts": artifacts,
@@ -327,27 +392,76 @@ def _run_command(
             returncode = 1
     return {
         "configured": True,
+        "command": command,
+        "provenance": provenance,
         "returncode": returncode,
         "stdout": stdout_tail,
         "stderr": stderr_tail,
         "diagnostics": diagnostics,
         "timeout": False,
         "timeout_seconds": timeout_seconds,
+        "started_at": started_at,
+        "started_epoch": start_epoch,
+        "finished_at": _iso_from_epoch(finish_epoch),
+        "finished_epoch": finish_epoch,
         "stdout_tail_path": str(stdout_path) if stdout_path else "",
         "stderr_tail_path": str(stderr_path) if stderr_path else "",
     }
 
 
-def _skipped_command(command: str, reason: str) -> dict[str, Any]:
+def _skipped_command(command_item: dict[str, Any], reason: str, cwd: Path) -> dict[str, Any]:
+    command = str(command_item.get("command", ""))
     return {
         "configured": bool(command),
+        "command": command,
+        "provenance": _command_provenance(command_item, cwd),
         "returncode": None,
         "stdout": "",
         "stderr": "",
         "diagnostics": [reason],
         "skipped": True,
         "timeout": False,
+        "timeout_seconds": int(command_item.get("timeout_seconds", 0) or 0),
     }
+
+
+def _command_provenance(command_item: dict[str, Any], cwd: Path) -> dict[str, Any]:
+    command = str(command_item.get("command", ""))
+    configured = bool(command)
+    return {
+        "label": str(command_item.get("label", "")),
+        "command": command,
+        "command_sha256": _sha256_text(command) if configured else "",
+        "cwd": str(cwd),
+        "source": str(command_item.get("source", "not_configured")),
+        "timeout_seconds": int(command_item.get("timeout_seconds", 0) or 0),
+        "timeout_source": str(command_item.get("timeout_source", "not_configured")),
+        "shell": True,
+        "requires_user_review": configured,
+        "review_status": "profile_command_unverified" if configured else "not_configured",
+        "risk_note": (
+            "This command is executed through the shell from project_profile.yaml. "
+            "Review project_profile.yaml before running verify on a new project."
+            if configured
+            else "No command is configured for this step."
+        ),
+    }
+
+
+def _sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _iso_from_epoch(epoch: float) -> str:
+    return datetime.fromtimestamp(epoch, timezone.utc).replace(microsecond=0).isoformat()
 
 
 def _command_log_paths(run_dir: Path | None, label: str) -> tuple[Path | None, Path | None]:
@@ -402,6 +516,7 @@ def _write_timeout_artifacts(
     stdout_tail: str,
     stderr_tail: str,
     process_cleanup: dict[str, Any],
+    provenance: dict[str, Any],
 ) -> dict[str, str]:
     if run_dir is None or not label:
         return {}
@@ -416,6 +531,7 @@ def _write_timeout_artifacts(
         "stdout_tail": stdout_tail,
         "stderr_tail": stderr_tail,
         "process_cleanup": process_cleanup,
+        "provenance": provenance,
     }
     json_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
     md_path.write_text(
@@ -425,6 +541,11 @@ def _write_timeout_artifacts(
                 "",
                 f"- Timeout seconds: `{timeout_seconds}`",
                 f"- Command: `{command}`",
+                f"- Command source: `{provenance.get('source', '')}`",
+                f"- Command SHA256: `{provenance.get('command_sha256', '')}`",
+                f"- CWD: `{provenance.get('cwd', '')}`",
+                f"- Shell: `{str(provenance.get('shell', True)).lower()}`",
+                f"- Command review status: `{provenance.get('review_status', '')}`",
                 f"- Process cleanup method: `{process_cleanup.get('method', '')}`",
                 f"- Process tree guaranteed: `{str(process_cleanup.get('process_tree_guaranteed', False)).lower()}`",
                 f"- Manual check recommended: `{str(process_cleanup.get('manual_check_recommended', False)).lower()}`",
@@ -488,23 +609,154 @@ def _commands_ok(results: dict[str, Any]) -> bool:
     return True
 
 
-def _find_coverage_report(root: Path, run_dir: Path, configured: str) -> Path | None:
-    candidates = []
+def _find_coverage_report(root: Path, run_dir: Path, configured: str, coverage_command: dict[str, Any]) -> dict[str, Any]:
+    candidates = _coverage_report_candidates(root, run_dir, configured)
+    for candidate in candidates:
+        _classify_coverage_candidate(candidate, coverage_command)
+
+    selected = next((candidate for candidate in candidates if candidate["exists"] and candidate["freshness"] == "fresh"), None)
+    if selected is None and not coverage_command.get("configured"):
+        selected = next(
+            (candidate for candidate in candidates if candidate["exists"] and candidate["freshness"] == "unknown_existing_report"),
+            None,
+        )
+
+    result = {
+        "selected": "",
+        "selected_path": "",
+        "selected_copy": "",
+        "selected_copy_path": "",
+        "selected_sha256": "",
+        "freshness": "missing",
+        "reason": "no_coverage_report_found",
+        "freshness_tolerance_seconds": COVERAGE_FRESHNESS_TOLERANCE_SECONDS,
+        "coverage_command_started_at": coverage_command.get("started_at", ""),
+        "coverage_command_start_epoch": coverage_command.get("started_epoch"),
+        "coverage_command_finished_at": coverage_command.get("finished_at", ""),
+        "coverage_command_end_epoch": coverage_command.get("finished_epoch"),
+        "coverage_command_returncode": coverage_command.get("returncode"),
+        "coverage_command_timeout": coverage_command.get("timeout", False),
+        "candidates": candidates,
+    }
+    if selected is None:
+        if any(candidate["exists"] for candidate in candidates):
+            result["freshness"] = "stale_or_unverified"
+            result["reason"] = "coverage_report_stale_or_unverified"
+        return result
+
+    selected_path = Path(selected["path"])
+    result.update(
+        {
+            "selected": selected["display_path"],
+            "selected_path": str(selected_path),
+            "selected_sha256": selected["sha256"],
+            "freshness": selected["freshness"],
+            "reason": selected["reason"],
+        }
+    )
+    copied = _copy_selected_coverage_report(root, run_dir, selected_path)
+    if copied:
+        result["selected_copy"] = relpath(copied, root)
+        result["selected_copy_path"] = str(copied)
+    return result
+
+
+def _coverage_report_candidates(root: Path, run_dir: Path, configured: str) -> list[dict[str, Any]]:
+    raw_candidates: list[tuple[Path, str]] = []
     if configured:
-        candidates.extend([root / configured, run_dir / configured])
-    candidates.extend(
+        raw_candidates.extend([(run_dir / configured, "configured_path"), (root / configured, "configured_path")])
+    raw_candidates.extend(
         [
-            root / "coverage.xml",
-            root / "coverage" / "coverage.xml",
-            root / "coverage" / "summary.txt",
-            run_dir / "coverage.xml",
-            run_dir / "summary.txt",
+            (run_dir / "coverage.xml", "run_dir"),
+            (run_dir / "summary.txt", "run_dir"),
+            (root / "coverage.xml", "project_root"),
+            (root / "coverage" / "coverage.xml", "coverage_dir"),
+            (root / "coverage" / "summary.txt", "coverage_dir"),
         ]
     )
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-    return None
+    candidates: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw_path, source in raw_candidates:
+        path = raw_path.resolve()
+        key = str(path).lower() if os.name == "nt" else str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(_coverage_candidate_record(root, path, source))
+    return candidates
+
+
+def _coverage_candidate_record(root: Path, path: Path, source: str) -> dict[str, Any]:
+    exists = path.exists()
+    record: dict[str, Any] = {
+        "path": str(path),
+        "display_path": _display_path(root, path),
+        "source": source,
+        "exists": exists,
+        "mtime_epoch": None,
+        "mtime": "",
+        "size_bytes": 0,
+        "sha256": "",
+        "freshness": "missing",
+        "reason": "candidate_missing",
+    }
+    if not exists:
+        return record
+    stat = path.stat()
+    record.update(
+        {
+            "mtime_epoch": stat.st_mtime,
+            "mtime": _iso_from_epoch(stat.st_mtime),
+            "size_bytes": stat.st_size,
+            "sha256": _sha256_file(path),
+        }
+    )
+    return record
+
+
+def _classify_coverage_candidate(candidate: dict[str, Any], coverage_command: dict[str, Any]) -> None:
+    if not candidate["exists"]:
+        return
+    if not coverage_command.get("configured"):
+        candidate["freshness"] = "unknown_existing_report"
+        candidate["reason"] = "no_coverage_command_run"
+        return
+    if coverage_command.get("timeout") or coverage_command.get("returncode") not in (0, None):
+        candidate["freshness"] = "stale"
+        candidate["reason"] = "coverage_command_failed_or_timed_out"
+        return
+    start_epoch = coverage_command.get("started_epoch")
+    if start_epoch is None:
+        candidate["freshness"] = "unknown"
+        candidate["reason"] = "coverage_command_start_time_missing"
+        return
+    if float(candidate["mtime_epoch"]) >= float(start_epoch) - COVERAGE_FRESHNESS_TOLERANCE_SECONDS:
+        candidate["freshness"] = "fresh"
+        candidate["reason"] = "mtime_after_coverage_command_start"
+    else:
+        candidate["freshness"] = "stale"
+        candidate["reason"] = "mtime_before_coverage_command_start"
+
+
+def _copy_selected_coverage_report(root: Path, run_dir: Path, source: Path) -> Path | None:
+    destination_dir = run_dir / "coverage"
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    suffix = source.suffix or ".txt"
+    destination = destination_dir / f"selected_coverage_report{suffix}"
+    if source.resolve() == destination.resolve():
+        return destination
+    try:
+        shutil.copy2(source, destination)
+    except OSError:
+        return None
+    return destination
+
+
+def _display_path(root: Path, path: Path) -> str:
+    try:
+        return relpath(path, root)
+    except ValueError:
+        return str(path)
 
 
 def parse_coverage_report(path: Path, target: str = "") -> dict[str, Any]:
@@ -577,6 +829,41 @@ def render_review_checklist(results: dict[str, Any]) -> str:
             lines.append(f"  - {violation['check']} in `{violation['path']}`")
     else:
         lines.append("- generated-test audit: passed")
+    coverage_report = results.get("coverage_report") or {}
+    if coverage_report:
+        lines.append("")
+        lines.append("## Coverage Report Freshness")
+        lines.append(f"- selected: `{coverage_report.get('selected') or 'none'}`")
+        lines.append(f"- freshness: `{coverage_report.get('freshness')}`")
+        lines.append(f"- reason: `{coverage_report.get('reason')}`")
+        if coverage_report.get("selected_copy"):
+            lines.append(f"- archived copy: `{coverage_report['selected_copy']}`")
+        stale = [
+            candidate
+            for candidate in coverage_report.get("candidates", [])
+            if candidate.get("exists") and candidate.get("freshness") in {"stale", "unknown"}
+        ]
+        if stale:
+            lines.append("- stale or unverified candidates ignored:")
+            for candidate in stale:
+                lines.append(f"  - `{candidate.get('display_path')}`: {candidate.get('reason')}")
+        if coverage_report.get("freshness") == "unknown_existing_report":
+            lines.append("- warning: no coverage command ran, so the existing report was parsed with unknown freshness.")
+        if coverage_report.get("freshness") == "stale_or_unverified":
+            lines.append("- warning: coverage is unavailable because no fresh report was produced by the coverage command.")
+    if results.get("commands"):
+        lines.append("")
+        lines.append("## Profile Command Provenance")
+        lines.append("- Review project_profile.yaml before running verify on a new project; configured commands execute with shell=true from the project root.")
+        for label, command in results["commands"].items():
+            provenance = command.get("provenance") or {}
+            lines.append(
+                f"- {label}: source=`{provenance.get('source', '')}`, "
+                f"cwd=`{provenance.get('cwd', '')}`, "
+                f"shell=`{str(provenance.get('shell', True)).lower()}`, "
+                f"sha256=`{provenance.get('command_sha256', '')}`, "
+                f"review=`{provenance.get('review_status', '')}`"
+            )
     if not coverage.get("meets_threshold", True) and coverage["line_rate_percent"] is not None:
         lines.append("")
         lines.append("## Coverage Gap Summary")

@@ -4,11 +4,11 @@
 OpenCode using MiniMax, through embedded C++ GoogleTest generation and coverage
 improvement.
 
-The tool follows `codex_embedded_cpp_gtest_final_guide.md`:
+The tool follows `codex_embedded_cpp_gtest_initial_guide.md`:
 
 1. accept one target file, a target-file line coverage goal, and a user build-file anchor when supplied,
-2. route project-specific build/test/coverage questions through the configured evidence backend,
-3. collect target understanding through `gtestcov`'s CODRAX-backed evidence layer,
+2. route project-specific build/test/coverage questions through configured evidence backends,
+3. collect target understanding through local evidence candidates and CODRAX-backed synthesis when configured,
 4. build a constrained task package for OpenCode,
 5. preflight-check generated edits before compiling,
 6. verify focused build, filtered test, target coverage, and coverage-loop progress.
@@ -20,17 +20,43 @@ The tool follows `codex_embedded_cpp_gtest_final_guide.md`:
 - Plain-language workflow diagram: `docs/gtestcov_workflow.md`
 - Editable diagrams.net / draw.io workflow: `docs/gtestcov_workflow.drawio`
 
+Current Markdown docs are the authoritative development documentation. The
+checked-in
+`Out_of_the_box_ready/gtestcov-v0.4.0.zip` is the current local ready-to-use
+release-preparation package. `Out_of_the_box_ready/gtestcov-v0.3.0.zip` is kept
+only as a historical release artifact.
+
 ## Quick Start
 
 ```bash
 python -m pip install -e .[dev]
-gtestcov init --project-root /path/to/cpp/project
+gtestcov version
+gtestcov install doctor --project-root /path/to/cpp/project
+gtestcov codrax doctor --project-root /path/to/cpp/project
+gtestcov init --project-root /path/to/cpp/project --source-root src --test-root tests --build-root . --build-file <build-entry-file>
+gtestcov index build --project-root /path/to/cpp/project
+gtestcov index status --project-root /path/to/cpp/project
+gtestcov codrax-check --quick --project-root /path/to/cpp/project --target <target-file> --build-file <build-entry-file>
 gtestcov cover --project-root /path/to/cpp/project --target <target-file> --line-coverage 80 --build-file <build-entry-file>
 gtestcov check --project-root /path/to/cpp/project --run-id latest --target <target-file>
 gtestcov verify --project-root /path/to/cpp/project --run-id latest
 gtestcov next-round --project-root /path/to/cpp/project --run-id latest
 gtestcov memory-show --project-root /path/to/cpp/project --run-id latest
 ```
+
+`gtestcov init` can accept repeated `--source-root`, `--test-root`,
+`--build-root`, and `--exclude-dir` flags. Omit these flags when the project
+scan roots or build entry file are not known yet; the old
+`gtestcov init --project-root /path/to/cpp/project` path still writes the
+default profile.
+
+After scan roots are known, `gtestcov index build` creates the local file index
+and `gtestcov index status` confirms whether the cache is ready for fallback
+evidence collection.
+
+Use `gtestcov codrax-check --deep --project-root /path/to/cpp/project` only
+when explicitly validating deep repository citations. Deep check may run for a
+long time and should be observed through status/heartbeat/final-log artifacts.
 
 ## Version, Install, Upgrade, And Rollback
 
@@ -105,16 +131,22 @@ the tool writes `manual_review_needed.md` instead of asking the weak AI to guess
 
 ## CODRAX Evidence Backend
 
-For a real embedded project, `gtestcov` uses a local CODRAX CLI as the targeted,
-read-only evidence backend before it builds the OpenCode task package. CODRAX
-substantially improves a weak AI agent's ability to understand real project
-code, while `gtestcov` remains the control layer: it chooses the questions,
-checks `file:line` citations, trims the evidence, updates the profile, and
-writes the decision report and task package.
+For a real embedded project, `gtestcov` uses local file indexes, bulk symbol
+scan, optional search/semantic fallback paths, and a local CODRAX CLI when
+configured. CODRAX is the targeted, read-only synthesis backend for
+project-specific judgment; it is no longer the only search or understanding
+path. `gtestcov` remains the control layer: it chooses the questions, checks
+`file:line` citations, trims the evidence, updates the profile, and writes the
+decision report and task package.
 
 Project-specific understanding should flow through this `gtestcov` evidence
 layer. The weak AI should not call CODRAX directly by default; it receives only
 the structured evidence that `gtestcov` curated for the current target.
+
+Zoekt and semantic backends such as Serena, clangd, and ccls are optional
+PoC/fallback paths. They are not required for default `gtestcov` workflows.
+When they are missing, `gtestcov` falls back to local file indexing, bulk symbol
+scan, and CODRAX where configured.
 
 Configure the CODRAX backend in `project_profile.yaml`:
 
@@ -129,6 +161,7 @@ evidence:
     require_file_line: true
     idle_timeout_seconds: 300
     max_runtime_seconds: 7200
+    probe_timeout_seconds: 20
     native_log_tail_bytes: 65536
     final_log_max_bytes: 1048576
     status_update_interval_seconds: 2.0
@@ -141,7 +174,8 @@ evidence instead of weak-AI guesses.
 Then check the integration and collect evidence without generating tests:
 
 ```bash
-gtestcov codrax-check --project-root .
+gtestcov codrax doctor --project-root .
+gtestcov codrax-check --quick --project-root . --target <target-file> --build-file <build-entry-file>
 gtestcov profile-sync --project-root . --target <target-file> --line-coverage 80 --build-file <build-entry-file>
 gtestcov cover --project-root . --target <target-file> --line-coverage 80 --build-file <build-entry-file> --run-id coverage-run
 gtestcov status --project-root . --run-id coverage-run
@@ -149,6 +183,12 @@ gtestcov evidence --project-root . --target <target-file> --run-id evidence-smok
 gtestcov obligations --project-root . --target <target-file> --run-id obligations-smoke
 gtestcov analyze --project-root . --target <target-file> --run-id analyze-smoke
 ```
+
+Use `gtestcov codrax-check --deep --project-root .` only when you explicitly
+want a deep repository citation probe. It may run for a long time and should be
+observed through heartbeat/status/final-log artifacts. A bare
+`gtestcov codrax-check` is a compatibility entry point and is equivalent to the
+lightweight doctor check.
 
 When CODRAX is unavailable, times out, returns an error, or omits required
 `file:line` citations, `analyze` does not create a project-specific weak-AI task.
@@ -305,9 +345,13 @@ tags, and required assertions. OpenCode task packages require the weak AI to
 implement `ready` obligations and stop with `manual_review_needed.md` instead of
 inventing behavior for insufficient or hardware-only obligations.
 
-`codrax-check` probes the local CODRAX CLI with read-only help commands such as
-`--help`, `help`, and `--version`, then auto-selects a supported invocation when
-it can recognize the current protocol. If a future CODRAX release changes its CLI
+`gtestcov codrax doctor` probes the local CODRAX CLI with read-only help
+commands such as `--help`, `help`, and `--version`, then auto-selects a
+supported invocation when it can recognize the current protocol. It does not
+read the repository and does not require file:line evidence. `gtestcov
+codrax-check --quick` validates only explicit target/build-file inputs.
+`gtestcov codrax-check --deep` runs the long repository citation probe and is
+never the default pre-cover check. If a future CODRAX release changes its CLI
 shape, configure an explicit template:
 
 ```yaml

@@ -127,7 +127,7 @@ def codrax_check(
     profile: ProjectProfile | None = None,
     run_id: str | None = None,
     *,
-    mode: str = "deep",
+    mode: str = "doctor",
     target: str = "",
     build_file: str = "",
 ) -> dict[str, Any]:

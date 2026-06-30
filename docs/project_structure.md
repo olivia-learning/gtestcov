@@ -24,7 +24,9 @@ This is the tool implementation. Important groups:
 
 - CLI and integration: `cli.py`, `mcp_server.py`, `opencode.py`
 - Project understanding and evidence: `codrax.py`, `understanding.py`,
-  `discovery.py`, `profile_sync.py`
+  `discovery.py`, `profile_sync.py`, `file_index.py`,
+  `evidence_backend.py`, `evidence_pack.py`, `search_backend.py`,
+  `semantic_backend.py`
 - Test planning: `analyzer.py`, `obligations.py`, `task.py`, `cover.py`
 - Safety and verification: `audit.py`, `permissions.py`, `preflight.py`,
   `verify.py`, `diagnose.py`, `next_round.py`
@@ -33,7 +35,12 @@ This is the tool implementation. Important groups:
   `coverage_goal.py`, `dependency.py`, `adapters.py`
 
 Project-specific facts must not be hardcoded here unless they are gated by
-CODRAX file:line evidence, user input, profile data, or tool artifacts.
+CODRAX file:line evidence, user input, profile data, or tool artifacts. Local
+file indexes and bulk symbol scans provide deterministic candidate evidence;
+Zoekt and semantic backends such as Serena, clangd, and ccls remain optional
+PoC/fallback paths, not default hard dependencies.
+`evidence_pack.py` stores v3-only evidence pack cache data with
+`payloads.codrax`; older cache layouts are treated as cache misses.
 
 ### `tests/`
 
@@ -57,6 +64,15 @@ This is user-facing documentation.
 - `gtestcov_workflow.drawio`: editable diagrams.net / draw.io workflow.
 - `project_structure.md`: this file.
 
+### Release Artifacts
+
+`Out_of_the_box_ready/` contains ready-to-use release assets. The checked-in
+`Out_of_the_box_ready/gtestcov-v0.4.0.zip` is the current local
+release-preparation package. `Out_of_the_box_ready/gtestcov-v0.3.0.zip` is kept
+only as a historical release artifact. Future release packages should be rebuilt
+from final code and docs, include a matching `gtestcov_install_manifest.json`,
+and use a zip filename that matches the package version.
+
 ## User C++ Project
 
 The user C++ project is selected by `--project-root`. It does not have to be a
@@ -77,6 +93,12 @@ monorepo subdirectory, or another user-selected workspace.
 This records project-specific build/test/coverage settings and evidence-backed
 test support paths. Users should not have to write it from scratch; `gtestcov`
 and CODRAX evidence should fill it in where possible.
+
+CODRAX long-running requests are controlled by `idle_timeout_seconds`,
+`max_runtime_seconds`, `probe_timeout_seconds`,
+`status_update_interval_seconds`, `native_log_tail_bytes`, and
+`final_log_max_bytes`. There is no separate current `timeout_seconds` field for
+the main CODRAX request.
 
 ### `.gtestcov/`
 

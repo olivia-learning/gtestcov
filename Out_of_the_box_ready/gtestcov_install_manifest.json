@@ -1,0 +1,256 @@
+{
+  "package_name": "gtestcov",
+  "install_mode": "zip",
+  "version": "0.4.0",
+  "created_at": "2026-06-30T02:05:47Z",
+  "source": "gtestcov-v0.4.0.zip",
+  "python_requires": ">=3.10",
+  "entry_point": "gtestcov = gtestcov.cli:main",
+  "included_docs": [
+    "README.md",
+    "docs/install.md",
+    "docs/gtestcov_workflow.md",
+    "docs/gtestcov_workflow.drawio",
+    "docs/project_structure.md",
+    "codex_embedded_cpp_gtest_initial_guide.md"
+  ],
+  "excluded_docs_pattern": "docs/round*.md",
+  "notes": [
+    "Zoekt and semantic backends are optional PoC/fallback.",
+    "CODRAX deep checks are explicit opt-in.",
+    "Round logs are excluded from the ready-to-use zip by default to avoid private local path leakage.",
+    "Rendered workflow PNG is intentionally excluded from the release package.",
+    "The embedded manifest records package_payload_sha256. The external manifest records the final zip_sha256 because a zip cannot contain its own final hash without changing that hash."
+  ],
+  "manifest_files": 45,
+  "package_payload_sha256": "F15E46E833C7D8D6F4767FD9D5A41AF6FFD5BD0124A331B28D91E102A40F85AC",
+  "zip_sha256": "F43DE3371E26510D510F30ECFD9E81443D06573893214D4DC3DF5A98D18596F9",
+  "zip_sha256_scope": "external_manifest_final_zip_bytes",
+  "files": [
+    {
+      "path": "codex_embedded_cpp_gtest_initial_guide.md",
+      "sha256": "ece7c797da63ad4fb4a3b3915acc635a4fd7608b318fb3fe8fbe22369b71b982",
+      "size": 45505
+    },
+    {
+      "path": "docs/gtestcov_workflow.drawio",
+      "sha256": "30866fa99c28936aff92e71df108f5f1a88f25dbd5a9b40de48a6c8e0437d2fd",
+      "size": 29719
+    },
+    {
+      "path": "docs/gtestcov_workflow.md",
+      "sha256": "fa5986325b3d632f8632281e4642d2545bc9ea5a0b72b348f49e1ef654df03ba",
+      "size": 3582
+    },
+    {
+      "path": "docs/install.md",
+      "sha256": "6416105773f6f35e957d8c9862738d41bb0864946547145d8c9a1343856bc7f3",
+      "size": 10078
+    },
+    {
+      "path": "docs/project_structure.md",
+      "sha256": "422a4693bc9f911795415eaa1ae1e944345d7cb41ddf9378a27355f6087dac7b",
+      "size": 6163
+    },
+    {
+      "path": "Out_of_the_box_ready/install.md",
+      "sha256": "6416105773f6f35e957d8c9862738d41bb0864946547145d8c9a1343856bc7f3",
+      "size": 10078
+    },
+    {
+      "path": "pyproject.toml",
+      "sha256": "0889fbaa98ffc07b42eac79d720d25d911284a3a4d4bb20ab484e39a3574a22e",
+      "size": 594
+    },
+    {
+      "path": "README.md",
+      "sha256": "ebfc400059251dd6e3c221f446a40cddaa28ea099875545c70ad338d068b06cf",
+      "size": 19556
+    },
+    {
+      "path": "src/gtestcov/__init__.py",
+      "sha256": "22e140fcb67c48f4aca8803ff84e60fb182761b61c6e3564bbe668c3a9baae38",
+      "size": 122
+    },
+    {
+      "path": "src/gtestcov/__main__.py",
+      "sha256": "c2ee4ddb093c9af060cafaf68219907f8a6b7b301ed3f8bea75db7555adec987",
+      "size": 62
+    },
+    {
+      "path": "src/gtestcov/adapters.py",
+      "sha256": "12ba99e273a7a6e8a43b6163cb07abfba383b38c7890201b8e1d0f327de0959b",
+      "size": 6674
+    },
+    {
+      "path": "src/gtestcov/analyzer.py",
+      "sha256": "d6e10de7167653f6683108fe87f48281724b9a7c63d6926382f5f0d81ca42159",
+      "size": 18411
+    },
+    {
+      "path": "src/gtestcov/audit.py",
+      "sha256": "5d083e00616c5d31ad7bc02dda2b0cdb76fdf0d803f05f91dfe44fcc64f1ffd3",
+      "size": 10010
+    },
+    {
+      "path": "src/gtestcov/cli.py",
+      "sha256": "32b59c6ac9deb3e721046e0ba13e032a0ba1830f80190fac3583587489f086b0",
+      "size": 27958
+    },
+    {
+      "path": "src/gtestcov/codrax.py",
+      "sha256": "1c21d0f80621a4a53845b7808b913168dcd86654b704454750f4687ffa990a8d",
+      "size": 71863
+    },
+    {
+      "path": "src/gtestcov/cover.py",
+      "sha256": "3b749ced32b7c8bd467132e992f5f0140b8e3e2c07a05e678ad21dfec5eeac62",
+      "size": 2937
+    },
+    {
+      "path": "src/gtestcov/coverage_goal.py",
+      "sha256": "3ce9f416994c33647906203ac1f9176f5f6972e69efac1226c50e11ad45c298e",
+      "size": 732
+    },
+    {
+      "path": "src/gtestcov/dependency.py",
+      "sha256": "ae39880e54abf5156404b72a8a4a97b34dc644e96250dfa3d3794b3bc40ff1f5",
+      "size": 9024
+    },
+    {
+      "path": "src/gtestcov/detached_evidence.py",
+      "sha256": "7b0843bcfda105b22d9f2f8571571b81eb364ab2ceadb8b05185283ce028d1c4",
+      "size": 12074
+    },
+    {
+      "path": "src/gtestcov/diagnose.py",
+      "sha256": "f382fd5b415d0e1fd05f588ac60199c07f69d05b366a8f5dfe13023582cb5676",
+      "size": 4545
+    },
+    {
+      "path": "src/gtestcov/discovery.py",
+      "sha256": "83f550800896e219ce88bb58f7f8275ceedc133b137d1cfd8880b52c655e2063",
+      "size": 7719
+    },
+    {
+      "path": "src/gtestcov/evidence_backend.py",
+      "sha256": "4c39eb0f556a4a8ea7ed3ede9fa5dc5eb6cb8cea58e3dd2aa1820d60866b29e2",
+      "size": 4869
+    },
+    {
+      "path": "src/gtestcov/evidence_pack.py",
+      "sha256": "71666f980d9504ccb05216a0b6210eb1728d928390e768842d5dfea8f0a4c4bb",
+      "size": 9943
+    },
+    {
+      "path": "src/gtestcov/evidence_paths.py",
+      "sha256": "bb0a0c1f4cc39170e3266ed23a62d39f85c0224320b98a496e5c02b9441c7771",
+      "size": 1580
+    },
+    {
+      "path": "src/gtestcov/evidence_types.py",
+      "sha256": "973d238ada2c59c5f03359fc1d924ff80b7b2be3dcd15b8d94d630aa3060bb53",
+      "size": 405
+    },
+    {
+      "path": "src/gtestcov/file_index.py",
+      "sha256": "3b1b22d325fa2ba761cf2726838ba3cc0d17c0b2ab9de7f8e8c1da5aab8a7c06",
+      "size": 5438
+    },
+    {
+      "path": "src/gtestcov/fs.py",
+      "sha256": "38e16523fdf95e3e3a32de9c5855689c99e4258c2d4936b21c992b95a5669d48",
+      "size": 5962
+    },
+    {
+      "path": "src/gtestcov/mcp_server.py",
+      "sha256": "4f0fe727fa1317515b91f73509526afc1a28107fca0849b39da18d72fc3ea0d6",
+      "size": 7196
+    },
+    {
+      "path": "src/gtestcov/memory.py",
+      "sha256": "e82de6a1d33fcc3b9929c9d82a9d6ff346ac7b06dee8ff5008f04abf22a9b115",
+      "size": 24658
+    },
+    {
+      "path": "src/gtestcov/models.py",
+      "sha256": "da942772f0be61a3010acf5684079087d92cef63d4baa5fee8aa22af36ffd46c",
+      "size": 10613
+    },
+    {
+      "path": "src/gtestcov/next_round.py",
+      "sha256": "36fe08ac4e88bff90621678852d72aaabc59b6c8c255f70c89ae1eac78ef07c3",
+      "size": 21846
+    },
+    {
+      "path": "src/gtestcov/obligations.py",
+      "sha256": "f529e4f95f0ee68142891bd59425c0d126719330462164f7dfb0d635cc0d9c77",
+      "size": 12760
+    },
+    {
+      "path": "src/gtestcov/opencode.py",
+      "sha256": "d614d9063c2ab3a34f07a9cb93b0afbdf562c33cea1de4ac98a37f44d95f4ccd",
+      "size": 6719
+    },
+    {
+      "path": "src/gtestcov/permissions.py",
+      "sha256": "257d50440c3d2ee71a73396144d9f42b4dcb32f835fa34fbfabd0f9778cfbaaa",
+      "size": 4712
+    },
+    {
+      "path": "src/gtestcov/preflight.py",
+      "sha256": "02c71627f168cab44bcc2b1d3b0d068f937054f6318d170af2ec60a1e7c874e8",
+      "size": 8908
+    },
+    {
+      "path": "src/gtestcov/profile.py",
+      "sha256": "ea0787eafb2f3a680f125e3486e28512f0b860e8495b0d30f24417a675c11a94",
+      "size": 4492
+    },
+    {
+      "path": "src/gtestcov/profile_sync.py",
+      "sha256": "d4b85f64c7eec4500108160248c94dacd9709f62f6b85cc96a838006d5925fd4",
+      "size": 24938
+    },
+    {
+      "path": "src/gtestcov/run_status.py",
+      "sha256": "c380aacd97e7c79dfcde35af978da28914766e05d0c25d6d2d5a1d199a86a254",
+      "size": 4102
+    },
+    {
+      "path": "src/gtestcov/search_backend.py",
+      "sha256": "3072b82cb0c97866772e0d30cfc4bb2558dfe45a01c0e766f9f6c87d4373ec71",
+      "size": 13213
+    },
+    {
+      "path": "src/gtestcov/semantic_backend.py",
+      "sha256": "4443ce988eab40ee1242b4a49733743fb1c70af5fcd983ed63b2ea13cc1346b0",
+      "size": 10692
+    },
+    {
+      "path": "src/gtestcov/task.py",
+      "sha256": "2c69fa625e26593483f7c3d269f89708f825204883d8adf4b6ae69181c5e732d",
+      "size": 13075
+    },
+    {
+      "path": "src/gtestcov/understanding.py",
+      "sha256": "084c562d99d744cde3ab9ed34923348ab1a0882626d8950cb6b690f94b42859a",
+      "size": 11438
+    },
+    {
+      "path": "src/gtestcov/upgrade.py",
+      "sha256": "8dddc17e31b0797704dc228a3ecd71be2b1fe5d780d6863faae3ce003ce941d6",
+      "size": 33860
+    },
+    {
+      "path": "src/gtestcov/verify.py",
+      "sha256": "eb45cbcffe48209f0378d88699cde7641243b5ba67c88be9e37be57126a555ad",
+      "size": 34140
+    },
+    {
+      "path": "src/gtestcov/version.py",
+      "sha256": "f0108921b330c13df6c355ce6bed18734369ea5fa0ccfa71a9fcf663d105cfb5",
+      "size": 7308
+    }
+  ]
+}

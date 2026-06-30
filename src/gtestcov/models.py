@@ -93,7 +93,6 @@ class CodraxEvidenceConfig(BaseModel):
     model_policy: str = "self_hosted_ok"
     max_context: str = "targeted"
     require_file_line: bool = True
-    timeout_seconds: int = 180
     idle_timeout_seconds: int = 300
     max_runtime_seconds: int = 7200
     probe_timeout_seconds: int = 20

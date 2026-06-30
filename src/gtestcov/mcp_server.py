@@ -64,7 +64,7 @@ def run_mcp_server() -> None:
 
     @mcp.tool()
     def gtestcov_codrax_check(project_root: str = ".", run_id: str = "") -> dict[str, Any]:
-        """Check whether the configured CODRAX CLI can return file:line evidence."""
+        """Run the lightweight CODRAX CLI/protocol doctor check."""
         return codrax_check(Path(project_root), run_id=run_id or None)
 
     @mcp.tool()

@@ -12,16 +12,21 @@ SKIP_DIRS = {
     ".svn",
     ".gtestcov",
     ".cache",
+    ".repo",
     "__pycache__",
     "build",
     "cmake-build-debug",
     "cmake-build-release",
     "node_modules",
+    "out",
+    "third_party",
+    "vendor",
+    "prebuilts",
 }
 
 
 CPP_SUFFIXES = {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx"}
-RUN_ID_RE = re.compile(r"[^A-Za-z0-9_.-]+")
+RUN_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
 def iter_files(
@@ -129,10 +134,20 @@ def read_text(path: Path) -> str:
 def sanitize_run_id(run_id: str | None = None) -> str:
     if run_id in (None, "", "new"):
         return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    cleaned = RUN_ID_RE.sub("_", str(run_id).strip()).replace("..", "_").strip("._-")
-    if not cleaned:
+    raw = str(run_id).strip()
+    if not raw or raw == "new":
         return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    return cleaned[:80]
+    if (
+        "/" in raw
+        or "\\" in raw
+        or ":" in raw
+        or ".." in raw
+        or Path(raw).is_absolute()
+        or not RUN_ID_RE.fullmatch(raw)
+        or not raw.strip("._-")
+    ):
+        raise ValueError(f"unsafe run_id: {run_id}")
+    return raw[:80]
 
 
 def resolve_project_path(project_root: Path, value: str | Path) -> Path:

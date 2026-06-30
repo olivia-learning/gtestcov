@@ -8,7 +8,7 @@ from typing import Any
 from .codrax import FILE_LINE_RE, execute_codrax_request, render_codrax_evidence, write_codrax_evidence
 from .evidence_pack import attach_cache, evidence_cache_status, load_codrax_payload, store_codrax_payload
 from .evidence_paths import codrax_test_source_dirs
-from .fs import ensure_run_dir
+from .fs import ensure_run_dir, resolve_project_path
 from .memory import refresh_memory
 from .models import CodraxEvidence, ProjectProfile
 from .profile import PROFILE_NAME, load_profile, profile_to_yaml
@@ -56,6 +56,15 @@ BOOL_FIELDS = {
     "evidence.codrax.direct_mode.require_audit_log",
 }
 
+EXECUTABLE_COMMAND_FIELDS = {
+    "build.build_command",
+    "build.incremental_build_command",
+    "build.test_command",
+    "build.filtered_test_command",
+    "build.coverage_command",
+    "build.target_coverage_command",
+}
+
 
 def profile_sync(
     project_root: Path,
@@ -68,6 +77,9 @@ def profile_sync(
     run_id, run_dir = ensure_run_dir(root, run_id)
     profile = load_profile(root)
     cfg = profile.evidence.codrax
+    resolve_project_path(root, target)
+    if build_file:
+        resolve_project_path(root, build_file)
     update_run_status(
         run_dir,
         phase="profile_sync.start",
@@ -164,6 +176,8 @@ def profile_sync(
             "profile_path": str(root / PROFILE_NAME),
             "backup_path": "",
             "profile_evidence_path": "",
+            "updates": {},
+            "executable_command_candidates": {},
             "codrax_evidence": evidence.model_dump(mode="json"),
             "evidence_cache": evidence_cache_status(evidence),
             "notes": ["CODRAX evidence was not usable; profile was not updated."],
@@ -207,6 +221,7 @@ def profile_sync(
             "evidence": ["user input"],
             "source": "user",
         }
+    executable_command_candidates = extract_executable_command_candidates(updates)
     if comparison["status"] in {"mismatch", "no_codrax_candidates"}:
         status = "build_file_mismatch" if comparison["status"] == "mismatch" else "build_file_unverified"
         reason = (
@@ -224,7 +239,17 @@ def profile_sync(
             encoding="utf-8",
         )
         write_codrax_evidence(run_dir, report_evidence)
-        profile_evidence_path = write_profile_evidence(run_dir, target, report_evidence, updates, comparison)
+        profile_evidence_path = write_profile_evidence(
+            run_dir,
+            target,
+            report_evidence,
+            updates,
+            comparison,
+            executable_command_candidates,
+        )
+        notes = [f"User build file anchor comparison status was {comparison['status']}; profile was not updated."]
+        if executable_command_candidates:
+            notes.append("CODRAX executable command candidates require user review and were not written to executable profile fields.")
         result = {
             "run_id": run_id,
             "status": status,
@@ -233,10 +258,11 @@ def profile_sync(
             "backup_path": "",
             "profile_evidence_path": str(profile_evidence_path),
             "updates": updates,
+            "executable_command_candidates": executable_command_candidates,
             "build_file_comparison": comparison,
             "codrax_evidence": report_evidence.model_dump(mode="json"),
             "evidence_cache": evidence_cache_status(report_evidence),
-            "notes": [f"User build file anchor comparison status was {comparison['status']}; profile was not updated."],
+            "notes": notes,
         }
         update_run_status(
             run_dir,
@@ -286,7 +312,17 @@ def profile_sync(
         )
         report_evidence = attach_cache(report_evidence, refreshed_cache)
     write_codrax_evidence(run_dir, report_evidence)
-    profile_evidence_path = write_profile_evidence(run_dir, target, report_evidence, updates, comparison)
+    profile_evidence_path = write_profile_evidence(
+        run_dir,
+        target,
+        report_evidence,
+        updates,
+        comparison,
+        executable_command_candidates,
+    )
+    notes = []
+    if executable_command_candidates:
+        notes.append("CODRAX executable command candidates require user review and were not written to executable profile fields.")
 
     result = {
         "run_id": run_id,
@@ -296,9 +332,11 @@ def profile_sync(
         "backup_path": str(backup_path) if backup_path else "",
         "profile_evidence_path": str(profile_evidence_path),
         "updates": updates,
+        "executable_command_candidates": executable_command_candidates,
         "build_file_comparison": comparison,
         "codrax_evidence": report_evidence.model_dump(mode="json"),
         "evidence_cache": evidence_cache_status(report_evidence),
+        "notes": notes,
     }
     update_run_status(
         run_dir,
@@ -493,6 +531,24 @@ def apply_profile_updates(profile: ProjectProfile, updates: dict[str, dict[str, 
     return updated
 
 
+def extract_executable_command_candidates(updates: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    candidates: dict[str, dict[str, Any]] = {}
+    for key in sorted(EXECUTABLE_COMMAND_FIELDS):
+        item = updates.pop(key, None)
+        if item is None:
+            continue
+        candidates[key] = {
+            **item,
+            "requires_user_review": True,
+            "review_status": "not_written_to_profile",
+            "risk_note": (
+                "CODRAX returned an executable shell command candidate. "
+                "Round05 keeps it as review evidence and does not write it to project_profile.yaml automatically."
+            ),
+        }
+    return candidates
+
+
 def backup_profile(project_root: Path, run_id: str, profile: ProjectProfile) -> Path:
     backup_dir = project_root / ".gtestcov" / "profile_backups"
     backup_dir.mkdir(parents=True, exist_ok=True)
@@ -514,6 +570,7 @@ def write_profile_evidence(
     evidence: CodraxEvidence,
     updates: dict[str, dict[str, Any]],
     build_file_comparison: dict[str, Any] | None = None,
+    executable_command_candidates: dict[str, dict[str, Any]] | None = None,
 ) -> Path:
     path = run_dir / "profile_evidence.md"
     lines = [
@@ -528,6 +585,21 @@ def write_profile_evidence(
         lines.append("- none")
     for key, item in sorted(updates.items()):
         lines.append(f"- `{key}` = `{item['value']}`; evidence={item['evidence']}")
+    command_candidates = executable_command_candidates or {}
+    lines.extend(["", "## Executable Command Candidates Requiring Review"])
+    if not command_candidates:
+        lines.append("- none")
+    for key, item in sorted(command_candidates.items()):
+        lines.append(
+            f"- `{key}` = `{item['value']}`; evidence={item['evidence']}; "
+            f"review_status=`{item.get('review_status')}`"
+        )
+    if command_candidates:
+        lines.append("")
+        lines.append(
+            "These CODRAX-returned shell command candidates were not written to executable "
+            "project_profile.yaml fields. Review and copy them manually only after confirming they are safe for this project."
+        )
     comparison = build_file_comparison or {}
     if comparison:
         lines.extend(
